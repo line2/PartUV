@@ -145,6 +145,10 @@ int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
 
     double distortion;
     bool not_enough_vertices = B.V.rows() - numNewVertices< 2;
+    prof::add_work("merge.calls", 1);
+    if (lscm_success != 0) prof::add_work("merge.reject_unwrap", 1);
+    else if (num_overlaps > 0) prof::add_work("merge.reject_overlap", 1);
+    else if (not_enough_vertices) prof::add_work("merge.reject_vertices", 1);
 
     #ifdef VERBOSE
         if (not_enough_vertices){
@@ -223,6 +227,7 @@ int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
         #endif
 
         if(distortion > distortion_threshold){
+            prof::add_work("merge.reject_distortion", 1);
             #ifdef VERBOSE
             std::cout << "distortion occurs after all B" << "distortion: " << distortion << std::endl;
             #endif
