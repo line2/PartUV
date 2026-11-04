@@ -14,7 +14,7 @@ pipeline:
   num_cuda_streams: 10
   
 unwrap:
-  method: "abf" # options: "lscm", "abf"
+  method: "abf" # "abf" | "lscm" | "igl_lscm" | "igl_harmonic1" | "igl_harmonic2" | "igl_arap" | "igl_slim"
   abf_iters: 5
   agg_parts: 10
   pamo: true

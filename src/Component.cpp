@@ -2,6 +2,7 @@
 #include "cheap_proxy.h"
 #include "iso_proxy.h"
 #include "idt_proxy.h"
+#include "igl_unwrap.h"
 #include "Component.h"
 #include <iostream>
 #include <vector>
@@ -788,7 +789,18 @@ int unwrap_pamo( Eigen::MatrixXd &V,
     std::string lscm_method = CONFIG_unwrapMethod;
     auto start = std::chrono::high_resolution_clock::now();
     int success;
-    if(lscm_method == "lscm")
+    if(lscm_method.rfind("igl_", 0) == 0)
+    {
+        success = igl_unwrap::flatten(V, F, UVc, lscm_method, CONFIG_unwrapAbfIters);
+        if (success == -2) success = -1;   // same meaning as abf_unwrap's "no boundary"
+        if (success != 0) {
+            if (CONFIG_verbose)
+                std::cerr << "[unwrap] " << lscm_method << " failed, marking chart for fallback"
+                          << std::endl;
+            return success;
+        }
+    }
+    else if(lscm_method == "lscm")
     {
         success =  lscm_unwrap(V, F, UVc);
     }
@@ -844,7 +856,18 @@ int unwrap(const  Eigen::MatrixXd V,
     std::string lscm_method = CONFIG_unwrapMethod;
     auto start = std::chrono::high_resolution_clock::now();
     int success;
-    if(lscm_method == "lscm")
+    if(lscm_method.rfind("igl_", 0) == 0)
+    {
+        success = igl_unwrap::flatten(V, F, UVc, lscm_method, CONFIG_unwrapAbfIters);
+        if (success == -2) success = -1;   // same meaning as abf_unwrap's "no boundary"
+        if (success != 0) {
+            if (CONFIG_verbose)
+                std::cerr << "[unwrap] " << lscm_method << " failed, marking chart for fallback"
+                          << std::endl;
+            return success;
+        }
+    }
+    else if(lscm_method == "lscm")
     {
         success =  lscm_unwrap(V, F, UVc);
     }

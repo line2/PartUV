@@ -7,6 +7,11 @@
 
 #include "pipeline.h"   // now declares the new signature
 #include "Component.h"
+#include "src/igl_unwrap.h"
+#include <igl/flipped_triangles.h>
+#include <chrono>
+#include <cstdio>
+#include "src/Distortion.h"
 #include "Config.h"
 #include "prof.h"
 
@@ -94,6 +99,53 @@ int omp_threads_used() {
 // ---------------------------------------------------------------------------
 // 3.  Module definition.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Per-chart flattening benchmark: run one parameterisation on one chart and
+// report wall time, folded faces and area distortion.  Used to compare ABF++
+// with the libigl methods on real charts rather than through the pipeline.
+// ---------------------------------------------------------------------------
+static py::dict bench_flatten_py(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F,
+                                 const std::string &method, int iters) {
+    py::dict out;
+    Eigen::MatrixXd UV;
+    std::fprintf(stderr, "[bench] start %s V=%d F=%d\n", method.c_str(),
+                 (int)V.rows(), (int)F.rows());
+    std::fflush(stderr);
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    int rc = 0;
+    if (method == "abf") {
+        rc = abf_unwrap(V, F, UV, iters);
+    } else {
+        rc = igl_unwrap::flatten(V, F, UV, method, iters);
+    }
+    std::fprintf(stderr, "[bench] solved rc=%d rows=%d\n", rc, (int)UV.rows());
+    std::fflush(stderr);
+    const auto t1 = std::chrono::high_resolution_clock::now();
+    const double secs = std::chrono::duration<double>(t1 - t0).count();
+
+    out["rc"] = rc;
+    out["seconds"] = secs;
+    out["faces"] = static_cast<int>(F.rows());
+    if (rc == 0 && UV.rows() == V.rows()) {
+        std::fprintf(stderr, "[bench] computing distortion\n");
+        std::fflush(stderr);
+        out["distortion"] = calculate_distortion_area(V, F, UV);
+        std::fprintf(stderr, "[bench] counting flips\n");
+        std::fflush(stderr);
+        Eigen::VectorXi flipped;
+        igl::flipped_triangles(UV, F, flipped);
+        out["flipped"] = static_cast<int>(flipped.size());
+        out["uv_valid"] = true;
+        std::fprintf(stderr, "[bench] done\n");
+        std::fflush(stderr);
+    } else {
+        out["distortion"] = -1.0;
+        out["flipped"] = -1;
+        out["uv_valid"] = false;
+    }
+    return out;
+}
+
 PYBIND11_MODULE(_core, m)
 {
     m.doc() = "UV‑unwrapping pipeline bindings";
@@ -154,6 +206,13 @@ Returns (final_part, individual_parts).
 Run the UV‑unwrapping pipeline directly on numpy arrays V (Nx3) and F (Mx3).
 Returns (final_part, individual_parts).
 )pbdoc");
+
+
+
+    m.def("bench_flatten",
+          &bench_flatten_py,
+          py::arg("V"), py::arg("F"), py::arg("method") = "abf", py::arg("iters") = 5,
+          "Flatten one chart with the named method; returns rc/seconds/flipped/distortion");
 
     m.def("omp_threads_used", &omp_threads_used, "Return OpenMP team size for a dummy region");
 }
