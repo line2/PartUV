@@ -1,7 +1,5 @@
 #include "cheap_proxy.h"
 
-#include <Eigen/Dense>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -9,21 +7,6 @@
 #include <vector>
 
 namespace cheap_proxy {
-
-double g_global_cell = 0.0;
-
-void set_global_resolution(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double frac) {
-    double area = 0.0;
-    for (int f = 0; f < F.rows(); ++f) {
-        Eigen::Vector3d a = V.row(F(f, 0)).transpose();
-        Eigen::Vector3d b = V.row(F(f, 1)).transpose();
-        Eigen::Vector3d c = V.row(F(f, 2)).transpose();
-        area += 0.5 * ((b - a).cross(c - a)).norm();
-    }
-    const int target = static_cast<int>(F.rows() * frac);
-    g_global_cell = suggest_cell(area, target < 64 ? 64 : target);
-}
-
 namespace {
 
 struct CellKey {
@@ -43,6 +26,24 @@ struct CellHash {
     }
 };
 
+/// One uniform-Laplacian pass: out = V + w * (mean(neighbours) - V).
+void laplacian_pass(const Eigen::MatrixXd &V, const std::vector<std::vector<int>> &adj,
+                    double w, Eigen::MatrixXd &out) {
+    const int nv = static_cast<int>(V.rows());
+    out.resize(nv, 3);
+    for (int i = 0; i < nv; ++i) {
+        const auto &nb = adj[i];
+        if (nb.empty()) {                    // isolated vertex: leave it where it is
+            out.row(i) = V.row(i);
+            continue;
+        }
+        Eigen::RowVector3d acc = Eigen::RowVector3d::Zero();
+        for (int j : nb) acc += V.row(j);
+        acc /= static_cast<double>(nb.size());
+        out.row(i) = V.row(i) + w * (acc - V.row(i));
+    }
+}
+
 }  // namespace
 
 double suggest_cell(double area_3d, int target_faces) {
@@ -50,8 +51,37 @@ double suggest_cell(double area_3d, int target_faces) {
     return std::sqrt(2.0 * area_3d / static_cast<double>(target_faces));
 }
 
+void taubin_smooth(Eigen::MatrixXd &V, const Eigen::MatrixXi &F, int iters,
+                   double lambda, double mu) {
+    const int nv = static_cast<int>(V.rows());
+    if (nv == 0 || iters <= 0) return;
+
+    // unique 1-ring adjacency
+    std::vector<std::vector<int>> adj(nv);
+    auto link = [&](int a, int b) {
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    };
+    for (int f = 0; f < F.rows(); ++f) {
+        const int a = F(f, 0), b = F(f, 1), c = F(f, 2);
+        link(a, b); link(b, c); link(c, a);
+    }
+    for (auto &v : adj) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    }
+
+    Eigen::MatrixXd tmp;
+    for (int it = 0; it < iters; ++it) {
+        laplacian_pass(V, adj, lambda, tmp);
+        V.swap(tmp);
+        laplacian_pass(V, adj, mu, tmp);     // mu negative: undoes the shrinkage
+        V.swap(tmp);
+    }
+}
+
 int decimate(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double cell,
-             Eigen::MatrixXd &Vo, Eigen::MatrixXi &Fo) {
+             Eigen::MatrixXd &Vo, Eigen::MatrixXi &Fo, int smooth_iters) {
     Vo.resize(0, 3);
     Fo.resize(0, 3);
     if (V.rows() == 0 || F.rows() == 0 || cell <= 0.0) return 0;
@@ -131,7 +161,26 @@ int decimate(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double cell,
     for (size_t i = 0; i < faces.size(); ++i)
         Fo.row(static_cast<int>(i)) << remap[faces[i][0]], remap[faces[i][1]], remap[faces[i][2]];
 
-    return static_cast<int>(faces.size());
+    // restore triangle shape: clustering snaps to cell centroids, which crushes curved
+    // regions and leaves slivers; the screening stage measures distortion on this mesh,
+    // so those artefacts would make good charts look bad and trigger extra splits.
+    if (smooth_iters > 0) {
+        taubin_smooth(Vo, Fo, smooth_iters);
+        std::vector<Eigen::Vector3i> keep;   // drop faces that folded during smoothing
+        keep.reserve(Fo.rows());
+        for (int f = 0; f < Fo.rows(); ++f) {
+            const Eigen::Vector3d a = Vo.row(Fo(f, 0)).transpose();
+            const Eigen::Vector3d b = Vo.row(Fo(f, 1)).transpose();
+            const Eigen::Vector3d c = Vo.row(Fo(f, 2)).transpose();
+            if ((b - a).cross(c - a).squaredNorm() > 1e-24)
+                keep.emplace_back(Fo(f, 0), Fo(f, 1), Fo(f, 2));
+        }
+        if (keep.empty()) return 0;
+        Fo.resize(static_cast<int>(keep.size()), 3);
+        for (size_t i = 0; i < keep.size(); ++i) Fo.row(static_cast<int>(i)) = keep[i].transpose();
+    }
+
+    return static_cast<int>(Fo.rows());
 }
 
 }  // namespace cheap_proxy

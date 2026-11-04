@@ -600,7 +600,6 @@ void mock_pipeline(const std::string &mesh_filename, double threshold){
     std::vector<std::vector<double>> edge_lengths;
     gFaceAdj = computeFaceAdjacency(gF, gV, edge_lengths);
     // model-wide proxy resolution, used when pamo_proxy_mode == "global"
-    cheap_proxy::set_global_resolution(gV.cast<double>(), gF, 0.05);
 }
 
 void get_individual_parts(std::vector<UVParts> &individual_parts){

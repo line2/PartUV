@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Restore CuMeshSimplifier.cpp, re-apply the cudaFreeHost fix, and instrument the
 PAMO loop with non-overlapping (brace-scoped) timers."""
+import os
 import subprocess
 import sys
 
-REPO = "${PARTUV_WORK}/PartUV"
+REPO = os.path.join(os.environ.get("PARTUV_WORK", os.path.expanduser("~/partuv_work")), "PartUV")
 p = f"{REPO}/src/CuMeshSimplifier.cpp"
 
 subprocess.run(["git", "checkout", "--", "src/CuMeshSimplifier.cpp"], cwd=REPO, check=True)

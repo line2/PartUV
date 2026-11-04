@@ -26,7 +26,8 @@ def load_tree(path):
 def main():
     mesh_path, tree_path, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
     thr = float(sys.argv[4]) if len(sys.argv) > 4 else 1.25
-    cfg = sys.argv[5] if len(sys.argv) > 5 else "${PARTUV_WORK}/PartUV/config/config.yaml"
+    default_cfg = os.path.join(os.environ.get("PARTUV_WORK", os.path.expanduser("~/partuv_work")), "PartUV", "config", "config.yaml")
+    cfg = sys.argv[5] if len(sys.argv) > 5 else default_cfg
 
     mesh = trimesh.load(mesh_path, process=False, force="mesh")
     V = np.asarray(mesh.vertices, dtype=np.float64)

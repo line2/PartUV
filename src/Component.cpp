@@ -447,11 +447,9 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
             target = std::max(120, std::min(target, kMaxProxyFaces));
             // grid clustering overshoots the requested count by ~1.3x on curved patches
             target = static_cast<int>(target / 1.3);
-            const double cell = (CONFIG_pamoProxyMode == "global" && cheap_proxy::g_global_cell > 0.0)
-                                    ? cheap_proxy::g_global_cell
-                                    : cheap_proxy::suggest_cell(area, std::max(60, target));
+            const double cell = cheap_proxy::suggest_cell(area, std::max(60, target));
             Eigen::MatrixXd Vs; Eigen::MatrixXi Fs;
-            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs);
+            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, CONFIG_pamoProxySmooth);
             prof::add_work("proxy.faces", nf);
             if (nf < 8) {                  // degenerated: keep the original chart
                 return abf_unwrap(V, F, UVc, num_iter);

@@ -5,7 +5,7 @@ from collections import defaultdict
 import numpy as np
 
 import sys
-sys.path.insert(0, "${PARTUV_WORK}/scripts")
+sys.path.insert(0, os.path.join(os.environ.get("PARTUV_WORK", os.path.expanduser("~/partuv_work")), "scripts"))
 from partuv_uv_audit import load_obj, face_frame  # noqa: E402
 
 OBJ = os.environ.get("PARTUV_EVAL_OBJ", "partuv_colored.obj")
