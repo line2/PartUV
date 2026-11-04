@@ -1,5 +1,7 @@
 // main.cpp
 #include "cheap_proxy.h"
+#include "iso_proxy.h"
+#include "idt_proxy.h"
 #include "Component.h"
 #include <iostream>
 #include <vector>
@@ -477,7 +479,14 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
     // traffic, no convergence loop.  Deliberately crude: it only has to be
     // spatially close enough for overlap / distortion screening.
     // ------------------------------------------------------------------
-    if (CONFIG_pamoBackend == "cluster") {
+    if (CONFIG_pamoBackend == "identity") {
+        // control experiment: same code path as a proxy, but the "proxy" is the chart
+        prof::Scope _pid("proxy.identity");
+        prof::add_work("proxy.faces", F.rows());
+        return abf_unwrap(V, F, UVc, num_iter);
+    }
+    if (CONFIG_pamoBackend == "cluster" || CONFIG_pamoBackend == "iso" ||
+        CONFIG_pamoBackend == "idt") {
         {
             prof::Scope _pc("proxy.cluster");
             double area = 0.0;
@@ -499,7 +508,24 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
             popt.smooth_iters = CONFIG_pamoProxySmooth;
             popt.quadric_repr = (CONFIG_pamoProxyRepr != "centroid");
             Eigen::MatrixXd Vs; Eigen::MatrixXi Fs;
-            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, popt);
+            int nf = 0;
+            if (CONFIG_pamoBackend == "idt") {
+                prof::Scope _pi("proxy.idt");
+                nf = idt_proxy::build(V, F, std::max(60, target), Vs, Fs);
+                if (nf < 8) {
+                    prof::add_work("proxy.idt_fallback", 1);
+                    nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, popt);
+                }
+            } else if (CONFIG_pamoBackend == "iso") {
+                prof::Scope _pi("proxy.iso");
+                nf = iso_proxy::remesh(V, F, target, Vs, Fs);
+                if (nf < 8) {   // remesher refused the chart: fall back to clustering
+                    prof::add_work("proxy.iso_fallback", 1);
+                    nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, popt);
+                }
+            } else {
+                nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, popt);
+            }
             prof::add_work("proxy.faces", nf);
             proxydump::emit(V, F, Vs, Fs, cell, target, area);
             if (nf < 8) {                  // degenerated: keep the original chart

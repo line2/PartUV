@@ -18,7 +18,7 @@ unwrap:
   abf_iters: 5
   agg_parts: 10
   pamo: true
-  pamo_backend: "cluster"
+  pamo_backend: "cluster"   # "cluster" | "idt" (intrinsic Delaunay) | "iso" (CGAL remesh) | "" (CUDA PAMO)
   pamo_proxy_smooth: 0
   pamo_proxy_ratio: 0.05
   pamo_proxy_max_faces: 4000
