@@ -1,3 +1,5 @@
+#include "unwrap_cache.h"
+#include "unwrap_stats.h"
 #include <igl/read_triangle_mesh.h>
 #include <igl/write_triangle_mesh.h>
 #include <igl/per_face_normals.h>
@@ -46,6 +48,7 @@ namespace fs = std::filesystem;
 
 
 #include <easy/profiler.h>
+#include "prof.h"
 
 
 
@@ -64,14 +67,11 @@ using namespace MeshLib;
 
 int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
 {
-    Eigen::MatrixXd VA = A.V; 
-    Eigen::MatrixXd VB = B.V; 
-    Eigen::MatrixXi FA = A.F; 
-    Eigen::MatrixXi FB = B.F;
-
-
+    prof::Scope _pf("merge.attempt");
+    // (removed) four deep copies of A.V/A.F/B.V/B.F that were never read
     Component retComp = A;
     Eigen::MatrixXd UVc;
+    uint64_t cache_key = 0;
     auto start_merge = std::chrono::high_resolution_clock::now();
     int numNewVertices = merge_mesh_B_to_A(A, B, retComp);
     #ifdef ENABLE_PROFILING
@@ -81,14 +81,32 @@ int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
 
     auto start_lscm = std::chrono::high_resolution_clock::now();
     #endif
-    std::string profile_log = "merging " + std::to_string(B.index) + " -> " + std::to_string(A.index) ;
-    EASY_BLOCK(profile_log, profiler::colors::Magenta);
+    EASY_BLOCK("merge", profiler::colors::Magenta);
     auto start = std::chrono::high_resolution_clock::now();
 
     Eigen::MatrixXd V_simp = retComp.V;
     Eigen::MatrixXi F_simp = retComp.F;
 
-    int lscm_success = unwrap_pamo(V_simp, F_simp, UVc);
+    unwrap_stats::probe(retComp.faces);
+    int lscm_success;
+    {
+        const unwrap_cache::Entry *cached = nullptr;
+        if (unwrap_cache::enabled_by_env())
+            cached = unwrap_cache::g_cache.get(retComp.faces, retComp.V, retComp.F, cache_key);
+        if (cached) {
+            V_simp = cached->V;
+            F_simp = cached->F;
+            UVc    = cached->UV;
+            lscm_success = 0;
+            prof::add_work("unwrap.cache_hit", 1);
+        } else {
+            lscm_success = unwrap_pamo(V_simp, F_simp, UVc);
+            prof::add_work("unwrap.cache_miss", 1);
+            if (lscm_success == 0)
+                unwrap_cache::g_cache.put(retComp.faces, retComp.V, retComp.F,
+                                          V_simp, F_simp, UVc);
+        }
+    }
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
 
@@ -106,10 +124,18 @@ int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
     std::cout << "unwrap took " << duration_lscm.count() << " seconds." << std::endl;
     auto start_overlap = std::chrono::high_resolution_clock::now();
     #endif
-    double num_overlaps;
+    double num_overlaps = 0.0;
     if(lscm_success == 0)
-    {   std::vector<std::pair<int, int>> overlap_triangles;
-        num_overlaps = computeOverlapingTrianglesFast(UVc, F_simp, overlap_triangles);
+    {
+        const double memo = unwrap_cache::g_cache.overlaps_of(cache_key);
+        if (memo >= 0.0) {
+            num_overlaps = memo;
+            prof::add_work("overlap.cache_hit", 1);
+        } else {
+            std::vector<std::pair<int, int>> overlap_triangles;
+            num_overlaps = computeOverlapingTrianglesFast(UVc, F_simp, overlap_triangles);
+            unwrap_cache::g_cache.set_overlaps(cache_key, num_overlaps);
+        }
     }
     #ifdef ENABLE_PROFILING
     auto end_overlap = std::chrono::high_resolution_clock::now();
@@ -135,13 +161,31 @@ int merge_B_to_A(Component &A, const Component &B, double distortion_threshold)
         retComp = A;
         merge_mesh_B_to_A(A, B, retComp, true);
         Eigen::MatrixXd UVc;
-        std::string profile_log = " 2. merging " + std::to_string(B.index) + " -> " + std::to_string(A.index) ;
-        EASY_BLOCK(profile_log, profiler::colors::Magenta);
+        EASY_BLOCK("merge2", profiler::colors::Magenta);
         auto start = std::chrono::high_resolution_clock::now();
         Eigen::MatrixXd V_simp = retComp.V;
         Eigen::MatrixXi F_simp = retComp.F;
 
-        int lscm_success = unwrap_pamo(V_simp, F_simp, UVc);
+        unwrap_stats::probe(retComp.faces);
+        int lscm_success;
+        {
+            const unwrap_cache::Entry *cached = nullptr;
+            if (unwrap_cache::enabled_by_env())
+                cached = unwrap_cache::g_cache.get(retComp.faces, retComp.V, retComp.F, cache_key);
+            if (cached) {
+                V_simp = cached->V;
+                F_simp = cached->F;
+                UVc    = cached->UV;
+                lscm_success = 0;
+                prof::add_work("unwrap.cache_hit", 1);
+            } else {
+                lscm_success = unwrap_pamo(V_simp, F_simp, UVc);
+                prof::add_work("unwrap.cache_miss", 1);
+                if (lscm_success == 0)
+                    unwrap_cache::g_cache.put(retComp.faces, retComp.V, retComp.F,
+                                              V_simp, F_simp, UVc);
+            }
+        }
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end - start;
     
@@ -326,7 +370,10 @@ void smoothComponentEdge(
 {
     // --- 1) Build a face -> component map for quick lookup ---
     int nFaces = static_cast<int>(faceAdj.size());
-    std::vector<int> faceToComp(nFaces, -1);
+    // Reused across calls: allocating + zero-filling nFaces ints (~2 MB at 500k faces)
+    // on every split was pure overhead.  Only touched entries are reset below.
+    static thread_local std::vector<int> faceToComp;
+    if (static_cast<int>(faceToComp.size()) < nFaces) faceToComp.assign(nFaces, -1);
 
     // Record how many components we currently have
     int numComponents = static_cast<int>(components.size());
@@ -335,8 +382,9 @@ void smoothComponentEdge(
     {
         for (int face : components[c])
         {
-            if(face >= nFaces){
+            if(face < 0 || face >= nFaces){
                 std::cout << "face: " << face << std::endl;
+                continue;               // out-of-range: never index the buffer
             }
             faceToComp[face] = c;
         }
@@ -363,6 +411,8 @@ void smoothComponentEdge(
         
     }
 
+    for (int f : allFaces)               // keep the scratch clean for the next call
+        if (f >= 0 && f < nFaces) faceToComp[f] = -1;
 }
 
 
@@ -840,33 +890,72 @@ std::vector<Component> merge_components_parallel(
         }
 
 
-        // print mergePairs
-        std::cout << "mergePairs: " << std::endl;
-        for (const auto &pair : mergePairs) {
-            std::cout << "(" << pair.first << ", " << pair.second << ")" << std::endl;
+        #ifdef VERBOSE
+        if (CONFIG_verbose) {
+            std::cout << "mergePairs: " << std::endl;
+            for (const auto &pair : mergePairs) {
+                std::cout << "(" << pair.first << ", " << pair.second << ")" << std::endl;
+            }
         }
-        #pragma omp parallel for 
-        for (std::size_t k = 0; k < mergePairs.size(); ++k)
+        #endif
+        // Pairs that share a component must not run concurrently: merge_B_to_A writes
+        // into allComponents[dst].  Process them in rounds of pairwise-disjoint pairs.
+        // Disjoint merges cannot influence each other, and the round order is fixed,
+        // so the output is reproducible.
         {
-            auto [src, dst] = mergePairs[k];          // src → dst
-            int succ = merge_B_to_A(allComponents[dst],allComponents[src],  threshold);            
-            #pragma omp critical
-            {
-                if (succ != -1)
+            auto merge_one = [&](std::size_t k) {
+                auto [src, dst] = mergePairs[k];          // src -> dst
+                int succ = merge_B_to_A(allComponents[dst], allComponents[src], threshold);
+                #pragma omp critical
                 {
-                    sortedIndices.erase(std::remove(sortedIndices.begin(), sortedIndices.end(), src), sortedIndices.end());
-                    /*  Critical zone: mark src dead & patch adjacency tables   */
-                    clean_up_neighbors(compAdjList,
-                                        allComponents[src],
-                                        dst);
-                    num_chart_handled++;
-                }else{
-                    // remove neighbor from compAdjList
-                    compAdjList[src].erase(std::remove_if(compAdjList[src].begin(), compAdjList[src].end(), 
-                                                        [&](const std::pair<int, double>& p) {
-                                                            return p.first == dst;
-                                                        }), compAdjList[src].end());
+                    if (succ != -1)
+                    {
+                        sortedIndices.erase(std::remove(sortedIndices.begin(), sortedIndices.end(), src), sortedIndices.end());
+                        /*  Critical zone: mark src dead & patch adjacency tables   */
+                        clean_up_neighbors(compAdjList,
+                                            allComponents[src],
+                                            dst);
+                        num_chart_handled++;
+                    }else{
+                        // remove neighbor from compAdjList
+                        compAdjList[src].erase(std::remove_if(compAdjList[src].begin(), compAdjList[src].end(),
+                                                            [&](const std::pair<int, double>& p) {
+                                                                return p.first == dst;
+                                                            }), compAdjList[src].end());
+                    }
                 }
+            };
+
+            std::vector<std::size_t> pending(mergePairs.size());
+            for (std::size_t k = 0; k < pending.size(); ++k) pending[k] = k;
+            std::vector<char> busy(allComponents.size(), 0);
+
+            while (!pending.empty()) {
+                std::vector<std::size_t> round, next;
+                round.reserve(pending.size());
+                for (std::size_t k : pending) {
+                    const int src = mergePairs[k].first, dst = mergePairs[k].second;
+                    if (src < 0 || dst < 0 ||
+                        src >= static_cast<int>(busy.size()) || dst >= static_cast<int>(busy.size())) {
+                        continue;                       // out of range: drop
+                    }
+                    if (!busy[src] && !busy[dst]) {
+                        busy[src] = busy[dst] = 1;
+                        round.push_back(k);
+                    } else {
+                        next.push_back(k);              // conflicts with this round
+                    }
+                }
+                if (round.empty()) break;               // defensive
+                #pragma omp parallel for
+                for (std::size_t i = 0; i < round.size(); ++i) {
+                    merge_one(round[i]);
+                }
+                for (std::size_t k : round) {
+                    busy[mergePairs[k].first] = 0;
+                    busy[mergePairs[k].second] = 0;
+                }
+                pending.swap(next);
             }
         }
     }

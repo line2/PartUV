@@ -25,6 +25,8 @@ public:
     int         unwrapAbfIters;
     int         unwrapAggParts;   // NEW: Default set to 10
     bool        unwrapPamo;
+    std::string pamoBackend;   // "cuda" | "cluster" (cheap vertex clustering)
+    std::string pamoProxyMode; // "relative" (per-chart 5%) | "global" (model-wide cell)
     int         unwrapUsePamoFaceThreshold; // use pamo if the face count is greater than this threshold (default: 1000)
 
     // Global verbose flag.
@@ -52,6 +54,8 @@ public:
           unwrapMethod("abf"),
           unwrapAbfIters(10),
           unwrapPamo(false),
+          pamoBackend("cuda"),
+          pamoProxyMode("relative"),
           unwrapAggParts(10),
           verbose(false),
           componentMaxDepth(10),
@@ -136,6 +140,10 @@ public:
                     unwrapAbfIters = unwrapNode["abf_iters"].as<int>();
                 if (unwrapNode["agg_parts"])   // NEW: Load unwrapAggParts if provided.
                     unwrapAggParts = unwrapNode["agg_parts"].as<int>();
+                if (unwrapNode["pamo_backend"])
+                    pamoBackend = unwrapNode["pamo_backend"].as<std::string>();
+                if (unwrapNode["pamo_proxy_mode"])
+                    pamoProxyMode = unwrapNode["pamo_proxy_mode"].as<std::string>();
                 if (unwrapNode["pamo"])
                     unwrapPamo = unwrapNode["pamo"].as<bool>();
                 if (unwrapNode["usePamoFaceThreshold"])
@@ -226,6 +234,8 @@ inline bool&        CONFIG_checkNon2Manifold     = ConfigManager::instance().che
 inline std::string& CONFIG_unwrapMethod         = ConfigManager::instance().unwrapMethod;
 inline int&         CONFIG_unwrapAbfIters       = ConfigManager::instance().unwrapAbfIters;
 inline bool&        CONFIG_unwrapPamo           = ConfigManager::instance().unwrapPamo;
+inline std::string& CONFIG_pamoBackend = ConfigManager::instance().pamoBackend;
+inline std::string& CONFIG_pamoProxyMode = ConfigManager::instance().pamoProxyMode;
 inline int&         CONFIG_unwrapUsePamoFaceThreshold = ConfigManager::instance().unwrapUsePamoFaceThreshold;
 // End of Selection
 

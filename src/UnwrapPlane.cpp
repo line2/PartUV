@@ -1,3 +1,6 @@
+#include "prof.h"
+#include "unwrap_cache.h"
+#include "unwrap_stats.h"
 #include <igl/read_triangle_mesh.h>
 #include <igl/write_triangle_mesh.h>
 #include <igl/per_face_normals.h>
@@ -364,18 +367,39 @@ int process_submesh(std::vector<int> faces, const Eigen::MatrixXd &V, const Eige
     double unwrap_distortion;
     Eigen::MatrixXd V_simp;
     Eigen::MatrixXi F_simp;
-    if (CONFIG_unwrapPamo && stream != nullptr){
-        V_simp = Vc;
-        F_simp = Fc;
-        lscm_success = unwrap_pamo(V_simp, F_simp, UVc, stream);
-        if (lscm_success == 0){
-            unwrap_distortion = calculate_distortion_area(V_simp, F_simp, UVc);
+    const bool use_pamo = (CONFIG_unwrapPamo && stream != nullptr);
+    uint64_t cache_key = 0;
+    unwrap_stats::probe(faces);
+    {
+        const unwrap_cache::Entry *cached = nullptr;
+        if (unwrap_cache::enabled_by_env())
+            cached = unwrap_cache::g_cache.get(faces, Vc, Fc, cache_key);
+        if (cached) {
+            V_simp = cached->V;
+            F_simp = cached->F;
+            UVc    = cached->UV;
+            if (!use_pamo) { Vc = cached->V; Fc = cached->F; }
+            lscm_success = 0;
+            prof::add_work("unwrap.cache_hit", 1);
+        } else {
+            prof::add_work("unwrap.cache_miss", 1);
+            if (use_pamo){
+                V_simp = Vc;
+                F_simp = Fc;
+                lscm_success = unwrap_pamo(V_simp, F_simp, UVc, stream);
+            }else{
+                lscm_success = unwrap(Vc, Fc, UVc);
+            }
+            if (lscm_success == 0) {
+                const Eigen::MatrixXd &Veff = use_pamo ? V_simp : Vc;
+                const Eigen::MatrixXi &Feff = use_pamo ? F_simp : Fc;
+                unwrap_cache::g_cache.put(faces, Vc, Fc, Veff, Feff, UVc);
+            }
         }
-
-    }else{
-        lscm_success = unwrap(Vc, Fc, UVc);
         if (lscm_success == 0){
-            unwrap_distortion = calculate_distortion_area(Vc, Fc, UVc);
+            const Eigen::MatrixXd &Veff = use_pamo ? V_simp : Vc;
+            const Eigen::MatrixXi &Feff = use_pamo ? F_simp : Fc;
+            unwrap_distortion = calculate_distortion_area(Veff, Feff, UVc);
         }
     }
     auto end = std::chrono::high_resolution_clock::now();
@@ -408,10 +432,19 @@ int process_submesh(std::vector<int> faces, const Eigen::MatrixXd &V, const Eige
         comp.F = Fc;
     }
     if (check_overlap){
-        std::vector<std::pair<int, int>> overlap_triangles;
-        auto num_overlaps = computeOverlapingTrianglesFast(UVc, comp.F, overlap_triangles);
+        double num_overlaps;
+        const double memo = unwrap_cache::g_cache.overlaps_of(cache_key);
+        if (memo >= 0.0) {
+            num_overlaps = memo;
+            prof::add_work("overlap.cache_hit", 1);
+        } else {
+            std::vector<std::pair<int, int>> overlap_triangles;
+            num_overlaps = computeOverlapingTrianglesFast(UVc, comp.F, overlap_triangles);
+            unwrap_cache::g_cache.set_overlaps(cache_key, num_overlaps);
+            prof::add_work("overlap.cache_miss", 1);
+        }
         if (num_overlaps > 0){
-            if(CONFIG_verbose) std::cout << overlap_triangles.size() <<  " Overlapping triangles found in UnwrapSubmesh for component: " <<  std::to_string(id) << std::endl;
+            if(CONFIG_verbose) std::cout << num_overlaps <<  " Overlapping triangles found in UnwrapSubmesh for component: " <<  std::to_string(id) << std::endl;
             return -1;
         }
     }

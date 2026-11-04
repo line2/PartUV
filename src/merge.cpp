@@ -1,3 +1,4 @@
+#include "prof.h"
 #include "merge.h"
 
 /**
@@ -7,6 +8,7 @@
  */
 int merge_mesh_B_to_A(const Component &A, const Component &B, Component &merge_result, bool use_all_faces_A )
 {
+    prof::Scope _pf("merge.mesh");
     using namespace Eigen;
 
 

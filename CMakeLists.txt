@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.10)
 # set(ENV{NVCC_PREPEND_FLAGS} "--allow-unsupported-compiler")
 # # (Optional) also initialize CMake's CUDA flags with it
 # set(CMAKE_CUDA_FLAGS_INIT "--allow-unsupported-compiler")
-set(CMAKE_CUDA_ARCHITECTURES 80 89 90 120)
+set(CMAKE_CUDA_ARCHITECTURES 80 89 90)
 if(NOT DEFINED CMAKE_CUDA_COMPILER)
   find_program(CMAKE_CUDA_COMPILER NAMES nvcc)
   if(NOT CMAKE_CUDA_COMPILER)
@@ -14,6 +14,7 @@ if(NOT DEFINED CMAKE_CUDA_COMPILER)
 endif()
 
 project(partuv LANGUAGES CXX CUDA)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Set up shared dependencies at the root level
 set(CMAKE_CXX_STANDARD 17)
@@ -86,14 +87,7 @@ include_directories(
 # Find common dependencies
 
 find_package(CGAL REQUIRED)
-find_package(easy_profiler REQUIRED
-    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/easy_profiler/lib/cmake/easy_profiler"
-) 
-get_target_property(_EP_SO easy_profiler IMPORTED_LOCATION_RELEASE)
-if(NOT _EP_SO)
-  get_target_property(_EP_SO easy_profiler IMPORTED_LOCATION)  # fallback if only generic set
-endif()
-install(FILES "${_EP_SO}" DESTINATION partuv/.libs)
+# easy_profiler stubbed out (no-op macros) 
 
 find_package(yaml-cpp REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -162,7 +156,6 @@ target_compile_options(_core PRIVATE
 # Link the Python module with the same dependencies as the main executable
 target_link_libraries(_core
     PUBLIC
-        easy_profiler
         # uvpcore_sdk          
     PRIVATE
         lscm_lib

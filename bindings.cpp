@@ -1,3 +1,5 @@
+#include "unwrap_cache.h"
+#include "unwrap_stats.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/eigen.h>
@@ -6,6 +8,7 @@
 #include "pipeline.h"   // now declares the new signature
 #include "Component.h"
 #include "Config.h"
+#include "prof.h"
 
 namespace py = pybind11;
 static inline int to_int_or_neg1(const py::handle& h) {
@@ -50,6 +53,9 @@ pipeline_file_py(const std::string& tree_filename,
         std::vector<UVParts> parts;
         UVParts final_part = pipeline(tree_filename, mesh_filename, threshold, parts);
         out = {final_part, std::move(parts)};
+    if (prof::enabled()) prof::dump_txt(getenv("PARTUV_PROF"));
+    unwrap_stats::dump();
+    unwrap_cache::g_cache.dump();
     return out;
 }
 
@@ -69,6 +75,9 @@ pipeline_numpy_py(const Eigen::Ref<const Eigen::MatrixXd>& V,
     std::vector<UVParts> parts;
     UVParts final_part = pipeline(V, F, nodes, configPath, threshold, pack_final_mesh, parts);
     out = {final_part, std::move(parts)};
+    if (prof::enabled()) prof::dump_txt(getenv("PARTUV_PROF"));
+    unwrap_stats::dump();
+    unwrap_cache::g_cache.dump();
     return out;
 }
 

@@ -1,3 +1,4 @@
+#include "prof.h"
 #include "CuMeshSimplifier.h"
 #include "cusimp.h"
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM
@@ -103,69 +104,76 @@ CuMeshSimplifier::simplify(const Eigen::MatrixXf& V_in,
     EASY_END_BLOCK;
     for(int it=0; it<max_iter; ++it)
     {
-        boundary = boundary_edges_from_faces(faces);
-        fixed_vertices = get_boundary_vertices(boundary);
+        prof::add_work("pamo.iter", 1);
 
-
-        // empty boundary
-        // boundary.clear();
-
-        // managed copies of current mesh
-
-
-        EASY_BLOCK("malloc",profiler::colors::Brown);
-
-        std::memcpy(d_v,verts.data(),verts.size()*sizeof(Vertex<float>));
-        std::memcpy(d_f,faces.data(),faces.size()*sizeof(Triangle<int>));
-        // std::memcpy(d_e,boundary.data(),boundary.size()*sizeof(Edge<int>));
-        std::memcpy(d_fixed_vertices, fixed_vertices.data(), fixed_vertices.size()*sizeof(int));
-        EASY_END_BLOCK;
-
-        
-
-
-        EASY_BLOCK("forward",profiler::colors::Grey);
-
-        if (stream == nullptr) {
-            sp.forward(d_v,d_f,d_e,d_fixed_vertices,
-                       int(verts.size()), int(faces.size()), int(boundary.size()),
-                       int(fixed_vertices.size()),
-                       scale,threshold,init);
-        } else {
-            sp.forward(d_v,d_f,d_e,d_fixed_vertices,
-                       int(verts.size()), int(faces.size()), int(boundary.size()),
-                       int(fixed_vertices.size()),
-                       scale,threshold,init, stream);
-        }
-        EASY_END_BLOCK;
-        // cudaDeviceSynchronize();
-        cudaStreamSynchronize(stream);
-        EASY_BLOCK("d2h",profiler::colors::Blue);
-        auto occ = d2h(sp.pts_occ, sp.n_pts, stream);
-        auto map = d2h(sp.pts_map, sp.n_pts, stream);
-        auto v   = d2h(sp.points , sp.n_pts, stream);
-        auto f   = d2h(sp.triangles, sp.n_tris, stream);
-        EASY_END_BLOCK;
-
-        std::vector<Triangle<int>> faces_new;
-        faces_new.reserve(f.size());
-        for(auto &t:f) if(t.i>=0)
-            faces_new.push_back({map[t.i],map[t.j],map[t.k]});
-
-        std::vector<Vertex<float>> verts_new;
-        verts_new.reserve(verts.size());
-        for(size_t i=0;i<v.size();++i) if(occ[i]) verts_new.push_back(v[i]);
-
-        if(faces_new.size()==faces.size())
         {
-            // cudaFree(d_v); cudaFree(d_f); cudaFree(d_e);
-            break;      // converged
+            prof::Scope _pb("pamo.boundary");
+            boundary = boundary_edges_from_faces(faces);
+            fixed_vertices = get_boundary_vertices(boundary);
         }
-        verts.swap(verts_new);
-        faces.swap(faces_new);
-        init=false;
-        // std::cout << "iter: " << it << " faces: " << faces.size() << std::endl;
-        // cudaFree(d_v); cudaFree(d_f); cudaFree(d_e);
+
+        {
+            prof::Scope _pm("pamo.h2d");
+            std::memcpy(d_v,verts.data(),verts.size()*sizeof(Vertex<float>));
+            std::memcpy(d_f,faces.data(),faces.size()*sizeof(Triangle<int>));
+            std::memcpy(d_fixed_vertices, fixed_vertices.data(), fixed_vertices.size()*sizeof(int));
+        }
+
+        {
+            prof::Scope _pk("pamo.kernel");
+            if (stream == nullptr) {
+                sp.forward(d_v,d_f,d_e,d_fixed_vertices,
+                           int(verts.size()), int(faces.size()), int(boundary.size()),
+                           int(fixed_vertices.size()),
+                           scale,threshold,init);
+            } else {
+                sp.forward(d_v,d_f,d_e,d_fixed_vertices,
+                           int(verts.size()), int(faces.size()), int(boundary.size()),
+                           int(fixed_vertices.size()),
+                           scale,threshold,init, stream);
+            }
+        }
+
+        {
+            prof::Scope _ps("pamo.sync");
+            cudaStreamSynchronize(stream);
+        }
+
+        decltype(d2h(sp.pts_occ, sp.n_pts, stream)) occ, map;
+        decltype(d2h(sp.points, sp.n_pts, stream))  v;
+        decltype(d2h(sp.triangles, sp.n_tris, stream)) f;
+        {
+            prof::Scope _pd("pamo.d2h");
+            occ = d2h(sp.pts_occ, sp.n_pts, stream);
+            map = d2h(sp.pts_map, sp.n_pts, stream);
+            v   = d2h(sp.points , sp.n_pts, stream);
+            f   = d2h(sp.triangles, sp.n_tris, stream);
+        }
+
+        bool converged = false;
+        {
+            prof::Scope _ph("pamo.host");
+            std::vector<Triangle<int>> faces_new;
+            faces_new.reserve(f.size());
+            for(auto &t:f) if(t.i>=0)
+                faces_new.push_back({map[t.i],map[t.j],map[t.k]});
+
+            std::vector<Vertex<float>> verts_new;
+            verts_new.reserve(verts.size());
+            for(size_t k=0;k<v.size();++k) if(occ[k]) verts_new.push_back(v[k]);
+
+            if(faces_new.size()==faces.size())
+            {
+                converged = true;
+            }
+            else
+            {
+                verts.swap(verts_new);
+                faces.swap(faces_new);
+                init=false;
+            }
+        }
+        if (converged) break;
     }
     EASY_END_BLOCK;
     // convert back to Eigen & un‑centre
@@ -181,6 +189,10 @@ CuMeshSimplifier::simplify(const Eigen::MatrixXf& V_in,
     {
         F_out(i,0)=faces[i].i; F_out(i,1)=faces[i].j; F_out(i,2)=faces[i].k;
     }
+
+    cudaFreeHost(d_v);
+    cudaFreeHost(d_f);
+    cudaFreeHost(d_fixed_vertices);
 
     // cudaStreamDestroy(stream); // Cleanup
     return {V_out,F_out};

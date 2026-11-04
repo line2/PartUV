@@ -5,6 +5,7 @@
 #include "Config.h"
 #include <igl/doublearea.h>
 #include <unordered_map>
+#include "prof.h"
 
 
 
@@ -15,6 +16,7 @@ double calculate_distortion_area(
     Tree *tree,
     int root)
 {
+    prof::Scope _pf("distortion");
     Eigen::VectorXd A3, A2;
     igl::doublearea(V, F, A3);
     igl::doublearea(UV, F, A2);

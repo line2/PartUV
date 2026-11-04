@@ -3,6 +3,7 @@
 // https://gist.github.com/TimSC/5ba18ae21c4459275f90
 
 // Modified by Manas Bhargava 17/12/2021
+#include "prof.h"
 #include "triangleHelper.hpp"
 
 #include <CGAL/box_intersection_d.h>
@@ -11,6 +12,8 @@
 #include <easy/profiler.h>
 
 typedef CGAL::Box_intersection_d::Box_d<double,2> Box;
+
+namespace { struct OverlapFound {}; }  // early-exit signal
 
 
 double total_time_spent_overlap = 0.0;
@@ -703,30 +706,29 @@ double computeOverlapingTrianglesFast(
 {
 
     EASY_FUNCTION(profiler::colors::Green);
+    prof::Scope _pf("overlap.cgal");
+    prof::add_work("overlap.cgal", F.rows());
     auto start = std::chrono::high_resolution_clock::now();
 
     ViewerDataSimple mesh(V, F);
     // auto start = std::chrono::system_clock::now();
     overlappingTriangles_return.clear();
 
-    std::vector<Point_2> points_2s(mesh.V.rows()); 
-    std::map<Point_2, int> vertexMap;
+    // Inexact kernel: the exact-constructions kernel builds lazy exact rationals for
+    // every triangle (bbox included) -- orders of magnitude slower and unnecessary here.
+    std::vector<Point_2S> points_2s(mesh.V.rows());
     for(int vi = 0; vi < mesh.V.rows(); vi++) {
-        points_2s[vi] = Point_2(mesh.V(vi,0), mesh.V(vi,1));
-        vertexMap[points_2s[vi]] = vi; 
+        points_2s[vi] = Point_2S(mesh.V(vi,0), mesh.V(vi,1));
     }
-    auto comparator = [](const Triangle_2& c1, const Triangle_2& c2) -> bool {
-        return c1.vertex(0) < c2.vertex(0);
-    };
 
-    // std::map<Color, int, decltype(comparator)> myMap(comparator);
-    std::list<Triangle_2> triangles;
-    std::map<Triangle_2, int, decltype(comparator)> triangleMap((comparator)); 
-    for(int fi = 0; fi < mesh.F.rows(); fi++) {    // from 0 -> 1
-        int v0 = mesh.F(fi, 0), v1 = mesh.F(fi, 1), v2 = mesh.F(fi, 2);
-        Triangle_2 tfi = Triangle_2(points_2s[v0], points_2s[v1], points_2s[v2]);
-        triangles.push_back(tfi);
-        triangleMap[tfi] = fi;
+    std::list<Triangle_2S> triangles;
+    triangles.resize(static_cast<std::size_t>(mesh.F.rows()));
+    {
+        auto it = triangles.begin();
+        for(int fi = 0; fi < mesh.F.rows(); fi++) {    // from 0 -> 1
+            int v0 = mesh.F(fi, 0), v1 = mesh.F(fi, 1), v2 = mesh.F(fi, 2);
+            *it++ = Triangle_2S(points_2s[v0], points_2s[v1], points_2s[v2]);
+        }
     }
 
     std::vector<Box> boxes;
@@ -742,6 +744,7 @@ double computeOverlapingTrianglesFast(
         fi++; 
     }
 
+    bool found = false;
     auto fun = [&](const Box &a,const Box &b) {
         // std::cout << "box " << a.id() << " intersects box " << b.id() << std::endl;
         if(a.id() == b.id())
@@ -769,11 +772,16 @@ double computeOverlapingTrianglesFast(
         if(isOverlapping) {
             auto fpair = (f0 < f1) ? make_pair(f0, f1) : make_pair(f1, f0);
             overlappingTriangles_return.push_back(fpair);
-            // isOverlapping = checkTriangleTriangleIntersection(T0, T1);
+            found = true;
+            throw OverlapFound{};      // callers only need "is there any overlap"
         }
     };
    
-    CGAL::box_self_intersection_d(boxes.begin(), boxes.end(), fun);
+    try {
+        CGAL::box_self_intersection_d(boxes.begin(), boxes.end(), fun);
+    } catch (const OverlapFound &) {
+        // first overlap found: stop the sweep (CGAL 6.1 ignores the callback's return)
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double>  elapsed_us = end - start;

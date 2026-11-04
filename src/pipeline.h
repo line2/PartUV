@@ -188,7 +188,7 @@ void mock_pipeline(const std::string &mesh_filename, double threshold);
 
 void get_individual_parts(std::vector<UVParts> &individual_parts);
 
-UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double chart_limit, int stack_level = 0);
+UVParts pipeline_helper(std::vector<int> leaves, Tree &tree, int root, double chart_limit, int stack_level = 0);
 
 /**
  * @brief The main pipeline function, which recursively processes a tree of submeshes

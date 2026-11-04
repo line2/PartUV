@@ -1,4 +1,5 @@
 // main.cpp
+#include "cheap_proxy.h"
 #include "Component.h"
 #include <iostream>
 #include <vector>
@@ -26,6 +27,7 @@
 
 #include "stream_pool.h"
 #include "triangleHelper.hpp"
+#include "prof.h"
 
 
 double total_time_spent_lscm = 0.0;
@@ -68,6 +70,7 @@ void ExtractSubmesh(
     Eigen::MatrixXi& Fc,
     Eigen::MatrixXd& Vc)
 {
+    prof::Scope _pf("submesh.extract");
     
     // Remove invalid faces
     std::vector<int> valid_faces_comp = faces_in_comp;
@@ -339,6 +342,7 @@ int lscm_unwrap(const Eigen::MatrixXd V,
     const Eigen::MatrixXi F,
     Eigen::MatrixXd &UVc)
 {
+    prof::Scope _pf("lscm.solve");
     EASY_BLOCK("LSCM"); 
 
 
@@ -419,6 +423,45 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
                  Eigen::MatrixXd &UVc,
                 const int num_iter,
                 cudaStream_t stream){
+                    prof::Scope _pf("pamo.total");
+    // ------------------------------------------------------------------
+    // Cheap proxy backend: one-pass grid vertex clustering instead of an
+    // iterative QEM collapse.  ~O(V+F), a few ms, no GPU, no host<->device
+    // traffic, no convergence loop.  Deliberately crude: it only has to be
+    // spatially close enough for overlap / distortion screening.
+    // ------------------------------------------------------------------
+    if (CONFIG_pamoBackend == "cluster") {
+        {
+            prof::Scope _pc("proxy.cluster");
+            double area = 0.0;
+            for (int f = 0; f < F.rows(); ++f) {
+                Eigen::Vector3d a = V.row(F(f, 0)).transpose();
+                Eigen::Vector3d b = V.row(F(f, 1)).transpose();
+                Eigen::Vector3d c = V.row(F(f, 2)).transpose();
+                area += 0.5 * ((b - a).cross(c - a)).norm();
+            }
+            // The proxy only has to be good enough for overlap/distortion screening, so
+            // coarsen hard: 5% of the chart, never more than kMaxProxyFaces.
+            const int kMaxProxyFaces = 600;
+            int target = static_cast<int>(F.rows() * 0.05);
+            target = std::max(120, std::min(target, kMaxProxyFaces));
+            // grid clustering overshoots the requested count by ~1.3x on curved patches
+            target = static_cast<int>(target / 1.3);
+            const double cell = (CONFIG_pamoProxyMode == "global" && cheap_proxy::g_global_cell > 0.0)
+                                    ? cheap_proxy::g_global_cell
+                                    : cheap_proxy::suggest_cell(area, std::max(60, target));
+            Eigen::MatrixXd Vs; Eigen::MatrixXi Fs;
+            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs);
+            prof::add_work("proxy.faces", nf);
+            if (nf < 8) {                  // degenerated: keep the original chart
+                return abf_unwrap(V, F, UVc, num_iter);
+            }
+            V.swap(Vs);
+            F.swap(Fs);
+        }
+        return abf_unwrap(V, F, UVc, num_iter);
+    }
+
 
 
             EASY_BLOCK("ABF++ PAMO");
@@ -456,6 +499,7 @@ int abf_unwrap(const Eigen::MatrixXd V,
                  Eigen::MatrixXd &UVc,
                 const int num_iter)
 {
+    prof::Scope _pf("abf.total");
 
     EASY_BLOCK("ABF++"); 
     EASY_VALUE("# F", F.rows());    
@@ -466,38 +510,46 @@ int abf_unwrap(const Eigen::MatrixXd V,
     auto startAbf = std::chrono::high_resolution_clock::now();
 
     auto mesh = ABF::Mesh::New();
-    for (int i = 0; i < V.rows(); i++)
+    prof::add_work("abf.faces", F.rows());
     {
-        mesh->insert_vertex(V(i, 0), V(i, 1), V(i, 2));
+        prof::Scope _mb("abf.build");
+        mesh->reserve(static_cast<std::size_t>(V.rows()), static_cast<std::size_t>(F.rows()));
+        for (int i = 0; i < V.rows(); i++)
+        {
+            mesh->insert_vertex(V(i, 0), V(i, 1), V(i, 2));
+        }
+        for (int i = 0; i < F.rows(); i++)
+        {
+            mesh->insert_face(F(i, 0), F(i, 1), F(i, 2));
+        }
     }
-    for (int i = 0; i < F.rows(); i++)
-    {
-        mesh->insert_face(F(i, 0), F(i, 1), F(i, 2));
-    }
-    
 
 
     double max_length = 0;
-    auto loops = mesh->find_boundary_loops();
-    if(loops.size() == 0)
     {
-        max_length = 0.001;
-        return -2;
-    }
-    else{
-        auto maxLoopIdx = mesh->find_longest_boundary_loop(loops, &max_length);
+        prof::Scope _bl("abf.boundary");
+        auto loops = mesh->find_boundary_loops();
+        if(loops.size() == 0)
+        {
+            max_length = 0.001;
+            return -2;
+        }
+        else{
+            auto maxLoopIdx = mesh->find_longest_boundary_loop(loops, &max_length);
+        }
     }
 
     std::size_t iters{0};
     double grad{OpenABF::INF<double>};
 
     EASY_BLOCK("ABF++"); 
-    ABF::Compute(mesh, iters, grad, num_iter);
+    { prof::Scope _ip("abf.angles"); ABF::Compute(mesh, iters, grad, num_iter); }
     EASY_END_BLOCK;
 
 
     EASY_BLOCK("ABF++ LSCM");
-    int success = ABFLSCM::Compute(mesh);
+    int success = 0;
+    { prof::Scope _ip("abf.lscm"); success = ABFLSCM::Compute(mesh); }
     EASY_END_BLOCK;
 
     if (success != 0)
@@ -506,11 +558,12 @@ int abf_unwrap(const Eigen::MatrixXd V,
     }
     
     UVc.resize(V.rows(), 2);
-
-
-    for (const auto& v : mesh->vertices()) {
-        UVc(v->idx, 0) = v->pos[0];
-        UVc(v->idx, 1) = v->pos[1];
+    {
+        prof::Scope _uc("abf.copyout");
+        for (const auto& v : mesh->vertices()) {
+            UVc(v->idx, 0) = v->pos[0];
+            UVc(v->idx, 1) = v->pos[1];
+        }
     }
 
     auto endAbf = std::chrono::high_resolution_clock::now();
@@ -561,6 +614,7 @@ int abf_unwrap_fix_boundary(const Eigen::MatrixXd V,
                 const int num_iter,
                 const std::unordered_map<std::size_t, std::pair<double,double>> pinned_uvs)
 {
+    prof::Scope _pf("abf.fixboundary");
 
     EASY_BLOCK("ABF++"); 
     EASY_VALUE("# F", F.rows());    
@@ -900,6 +954,7 @@ Component Component::operator+(const Component &other) const
 
 int ComputeOriginalUV(Component &component)
 {
+    prof::Scope _pf("final.reunwrap");
     if (component.V_original.rows()== 0){
         return -1;
     }

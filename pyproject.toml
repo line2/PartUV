@@ -24,7 +24,7 @@ sdist.include = [
   "extern/easy_profiler/lib/libeasy_profiler.so",
   "extern/easy_profiler/lib/cmake/easy_profiler/**",
 ]
-cmake.verbose = true
+build.verbose = true
 ninja.make-fallback = true
 
 wheel.packages = ["partuv", "preprocess_utils"]

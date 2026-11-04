@@ -1,3 +1,6 @@
+#include <optional>
+#include <utility>
+#include <vector>
 #ifndef IO_H
 #define IO_H
 
@@ -154,13 +157,49 @@ struct SubtreeInfo {
     const_iterator end() const { return nodes_.cend(); }
 
 
+    /// Remove the child->parent entry only if it still points at `expected_parent`
+    /// (a sibling may already have been re-parented elsewhere by reassign_face_in_tree).
+    void drop_child_link(int child, int expected_parent) {
+        auto it = parent_.find(child);
+        if (it != parent_.end() && it->second == expected_parent) parent_.erase(it);
+    }
+
     int set_node(int node_id, NodeRecord node) {
+        auto it = nodes_.find(node_id);
+        if (it != nodes_.end()) {           // drop stale child links before overwrite
+            drop_child_link(it->second.left, node_id);
+            drop_child_link(it->second.right, node_id);
+        }
         nodes_[node_id] = node;
+        parent_[node.left] = node_id;
+        parent_[node.right] = node_id;
         return node_id;
     }
 
     void delete_node(int node_id) {
-        nodes_.erase(node_id);
+        auto it = nodes_.find(node_id);
+        if (it != nodes_.end()) {
+            drop_child_link(it->second.left, node_id);
+            drop_child_link(it->second.right, node_id);
+            nodes_.erase(it);
+        }
+        parent_.erase(node_id);
+    }
+
+    /// O(1) child -> parent lookup (replaces the former O(N) full-tree scan).
+    int parent_of(int child) const {
+        auto it = parent_.find(child);
+        return it == parent_.end() ? -1 : it->second;
+    }
+
+    /// Rebuild the child -> parent index from nodes_ (after bulk loads).
+    void rebuild_parent_index() {
+        parent_.clear();
+        parent_.reserve(nodes_.size() * 2);
+        for (const auto &kv : nodes_) {
+            parent_[kv.second.left] = kv.first;
+            parent_[kv.second.right] = kv.first;
+        }
     }
 
     void update_distortion(const std::unordered_map<int, double> &leaf_distortion, int root);
@@ -194,6 +233,7 @@ struct SubtreeInfo {
  
      // Internal hash map for O(1) lookup: node id -> NodeRecord.
      std::unordered_map<int, NodeRecord> nodes_;
+     std::unordered_map<int, int> parent_;   ///< child id -> parent id
 
      const int root_; // Initialized in the initializer list and remains constant.
  
@@ -209,6 +249,54 @@ struct SubtreeInfo {
  * @param node_key The starting node id.
  * @return std::vector<int> Vector of leaf node ids.
  */
+
+// ---------------------------------------------------------------------------
+// Undo journal for tree edits.
+// `reassign_face_in_tree` (called from smoothComponentEdge) mutates a handful of
+// nodes.  Recording just those nodes lets pipeline_helper roll back a degenerate
+// split without snapshotting the whole tree (which is O(#faces) per recursion).
+// ---------------------------------------------------------------------------
+struct TreeUndo {
+    // ordered log of (node id, previous state); nullopt == the node did not exist.
+    std::vector<std::pair<int, std::optional<NodeRecord>>> log;
+};
+
+inline thread_local TreeUndo *g_tree_undo = nullptr;
+
+inline void tree_undo_touch(Tree &tree, int id) {
+    if (!g_tree_undo) return;
+    if (tree.contains(id)) g_tree_undo->log.emplace_back(id, tree[id]);
+    else                   g_tree_undo->log.emplace_back(id, std::nullopt);
+}
+
+inline void tree_undo_rollback(Tree &tree, TreeUndo &undo) {
+    // Replay backwards: the last recorded snapshot of each node is its oldest state.
+    for (auto it = undo.log.rbegin(); it != undo.log.rend(); ++it) {
+        if (it->second) tree.set_node(it->first, *it->second);
+        else if (tree.contains(it->first)) tree.delete_node(it->first);
+    }
+    undo.log.clear();
+}
+
+class TreeUndoGuard {
+public:
+    explicit TreeUndoGuard(Tree &tree) : tree_(tree) {
+        prev_ = g_tree_undo;
+        g_tree_undo = &undo_;
+    }
+    ~TreeUndoGuard() {
+        g_tree_undo = prev_;
+        tree_undo_rollback(tree_, undo_);   // frame-local edits never escape
+    }
+    TreeUndo &undo() { return undo_; }
+    TreeUndoGuard(const TreeUndoGuard &) = delete;
+    TreeUndoGuard &operator=(const TreeUndoGuard &) = delete;
+private:
+    Tree &tree_;
+    TreeUndo undo_;
+    TreeUndo *prev_;
+};
+
 std::vector<int> get_tree_leaves(const Tree &tree, int node_key);
 
 // int find_parent(const Tree &tree, int node_id) {

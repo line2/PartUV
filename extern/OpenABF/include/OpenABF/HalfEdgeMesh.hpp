@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <algorithm>
 #include <array>
 #include <iterator>
@@ -507,11 +508,46 @@ public:
     };
 
 private:
+    // ---- element arenas: stable addresses, no per-element heap allocation ----
+    // (insertion dominated ABF: one allocation per vertex, three per face)
+    std::deque<Vertex> vert_arena_;
+    std::deque<Edge>   edge_arena_;
+    std::deque<Face>   face_arena_;
+
+    template <typename... Args>
+    auto make_vertex(Args&&... args) -> VertPtr
+    {
+        vert_arena_.emplace_back(std::forward<Args>(args)...);
+        return VertPtr(VertPtr(), &vert_arena_.back());   // non-owning, no control block
+    }
+    auto make_edge() -> EdgePtr
+    {
+        edge_arena_.emplace_back();
+        return EdgePtr(EdgePtr(), &edge_arena_.back());
+    }
+    auto make_face() -> FacePtr
+    {
+        face_arena_.emplace_back();
+        return FacePtr(FacePtr(), &face_arena_.back());
+    }
+
     /** List of vertices */
     std::vector<VertPtr> verts_;
     /** List of faces */
     /** List of edges, indexed by the vertex's insertion index */
-    std::multimap<std::size_t, EdgePtr> edges_;
+    // diagnostics counted instead of printed: printing here dominated mesh
+    // construction under OpenMP (stderr lock + flush per non-manifold edge)
+    std::size_t non_manifold_edges_{0};
+    std::size_t degenerate_faces_{0};
+    std::vector<std::vector<EdgePtr>> edges_by_tail_;
+    std::size_t num_edges_{0};
+
+    void push_edge(std::size_t tail, const EdgePtr &e)
+    {
+        if (edges_by_tail_.size() <= tail) edges_by_tail_.resize(tail + 1);
+        edges_by_tail_[tail].push_back(e);
+        ++num_edges_;
+    }
 
     // NEW: Our vertex-mapping structure
     std::unordered_map<std::size_t, std::size_t> vertex_map_;
@@ -529,18 +565,21 @@ public:
             v->edge = nullptr;
             v->edges.clear();
         }
-        for (auto& e : edges_) {
-            e.second->pair = nullptr;
-            e.second->next = nullptr;
-            e.second->vertex = nullptr;
-            e.second->face = nullptr;
+        for (auto& bucket : edges_by_tail_) {
+            for (auto& e : bucket) {
+                e->pair = nullptr;
+                e->next = nullptr;
+                e->vertex = nullptr;
+                e->face = nullptr;
+            }
         }
         for (auto& f : faces_) {
             f->head = nullptr;
             f->next = nullptr;
         }
         verts_.clear();
-        edges_.clear();
+        edges_by_tail_.clear();
+        num_edges_ = 0;
         faces_.clear();
     }
 
@@ -556,10 +595,18 @@ public:
      *
      * Accepts all arguments supported by the Vertex constructor.
      */
+    /** @brief Pre-allocate storage for `n` vertices / `n` faces / `3n` edges */
+    void reserve(std::size_t nVerts, std::size_t nFaces)
+    {
+        verts_.reserve(nVerts);
+        faces_.reserve(nFaces);
+        edges_by_tail_.resize(nVerts);
+    }
+
     template <typename... Args>
     auto insert_vertex(Args... args) -> std::size_t
     {
-        auto vert = Vertex::New(std::forward<Args>(args)...);
+        auto vert = make_vertex(std::forward<Args>(args)...);
         vert->idx = verts_.size();
         verts_.push_back(vert);
         return vert->idx;
@@ -570,14 +617,14 @@ public:
     auto insert_face(const Vector& vector) -> std::size_t
     {
         // Make a new face structure
-        auto face = Face::New();
+        auto face = make_face();
 
         // Iterate over the vertex indices
         std::size_t prevIdx{0};
         EdgePtr prevEdge;
         for (const auto& idx : vector) {
             // Make a new edge
-            auto newEdge = Edge::New();
+            auto newEdge = make_edge();
             newEdge->face = face;
 
             // Set the head edge for this face
@@ -617,8 +664,8 @@ public:
             }
 
             // Store the edge
-            newEdge->idx = edges_.size();
-            edges_.emplace(idx, newEdge);
+            newEdge->idx = num_edges_;
+            push_edge(idx, newEdge);
 
             // Update for the next iteration
             prevIdx = idx;
@@ -689,7 +736,7 @@ public:
     auto insert_face_2(const Vector& vector) -> std::size_t
     {
         // Make a new face structure
-        auto face = Face::New();
+        auto face = make_face();
 
         // First pass: create and link edges (but do NOT pair them yet).
         EdgePtr prevEdge;
@@ -698,7 +745,7 @@ public:
 
         for (auto idx : vector) {
             // Create new edge
-            auto newEdge = Edge::New();
+            auto newEdge = make_edge();
             newEdge->face = face;
 
             // Set the head of this face if not set
@@ -736,12 +783,8 @@ public:
         for (auto e : *face) {
             double length = norm(e->next->vertex->pos - e->vertex->pos);
             if (length == 0.0) {
-                std::string msg = "Zero-length edge (" +
-                                std::to_string(e->vertex->idx) + ", " +
-                                std::to_string(e->next->vertex->idx) + ")";
-                // std::cout << msg << std::endl;
+                ++degenerate_faces_;
                 add_vertex_mapping(e->vertex, e->next->vertex);
-
                 return -1;  // Or throw, depending on your style
             }
             auto tailIdx = e->vertex->idx;
@@ -749,11 +792,7 @@ public:
             auto pair = find_edge_(headIdx, tailIdx);
             if (pair) {
                 if (pair->pair) {
-                    std::string msg = 
-                        "Resolved edge pair already paired. Edge (" +
-                        std::to_string(tailIdx) + ", " +
-                        std::to_string(headIdx) + ") is not 2-manifold. insert_face_2";
-                    std::cerr << msg << std::endl;
+                    ++non_manifold_edges_;
                     // throw MeshException(msg);
                     // return -1;  // Or throw, depending on your style
                 }
@@ -764,9 +803,9 @@ public:
         //  Store edges in edges_ container
         // -------------------------------------
         for (auto e : *face) {
-            e->idx = edges_.size();
+            e->idx = num_edges_;
             auto vert = e->vertex;
-            edges_.emplace(vert->idx, e);
+            push_edge(vert->idx, e);
 
             vert->edges.push_back(e);
             vert->edges_raw.push_back(e.get()); 
@@ -936,7 +975,9 @@ public:
     }
 
     /** @brief Get the number of edges */
-    auto num_edges() const -> std::size_t { return edges_.size(); }
+    auto num_edges() const -> std::size_t { return num_edges_; }
+    auto num_non_manifold_edges() const -> std::size_t { return non_manifold_edges_; }
+    auto num_degenerate_faces() const -> std::size_t { return degenerate_faces_; }
 
     /** @brief Get the number of faces */
     auto num_faces() const -> std::size_t { return faces_.size(); }
@@ -1181,8 +1222,8 @@ public:
         std::unordered_set<std::size_t> processed_edges;
 
 
-        for (const auto& edge_entry : edges_) {
-            auto edge = edge_entry.second;
+        for (const auto& bucket : edges_by_tail_)
+        for (const auto& edge : bucket) {
             // Skip non-boundary or already processed edges
             if (!edge->is_boundary() || processed_edges.count(edge->idx)) {
                 continue;
@@ -1402,12 +1443,8 @@ private:
     /** Find an existing edge with the provided end points */
     auto find_edge_(std::size_t start, std::size_t end) -> EdgePtr
     {
-        // Get edges with this start index
-        auto range = edges_.equal_range(start);
-
-        // Loop over potential edges
-        for (auto it = range.first; it != range.second; it++) {
-            const auto& e = it->second;
+        if (start >= edges_by_tail_.size()) return nullptr;
+        for (const auto& e : edges_by_tail_[start]) {
             if (e->next and e->next->vertex->idx == end) {
                 return e;
             }

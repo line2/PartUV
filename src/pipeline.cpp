@@ -1,3 +1,4 @@
+#include "cheap_proxy.h"
 #include "pipeline.h"
 #include "IO.h"
 #include "Component.h"
@@ -48,6 +49,7 @@
 
 #include <iostream>
 #include <fstream>
+#include "prof.h"
 
 namespace PMP = CGAL::Polygon_mesh_processing;
 
@@ -597,6 +599,8 @@ void mock_pipeline(const std::string &mesh_filename, double threshold){
     gThreshold = threshold;
     std::vector<std::vector<double>> edge_lengths;
     gFaceAdj = computeFaceAdjacency(gF, gV, edge_lengths);
+    // model-wide proxy resolution, used when pamo_proxy_mode == "global"
+    cheap_proxy::set_global_resolution(gV.cast<double>(), gF, 0.05);
 }
 
 void get_individual_parts(std::vector<UVParts> &individual_parts){
@@ -604,8 +608,12 @@ void get_individual_parts(std::vector<UVParts> &individual_parts){
 }
 
 
-UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double chart_limit, int stack_level)
-{   
+UVParts pipeline_helper(std::vector<int> leaves, Tree &tree, int root, double chart_limit, int stack_level)
+{
+    // Frame-local tree edits: rolled back on every return path (replaces the old
+    // whole-Tree-by-value copies, which gave each call an isolated view).
+    TreeUndoGuard tree_guard(tree);   
+    prof::Scope _pf("node.helper");
     if(leaves.size() == 0){
         std::cerr << "[PIPELINE] WARNING 0 faces in the submesh " << root << " Returnning." << std::endl;
         return UVParts({});
@@ -698,7 +706,6 @@ UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double cha
             }
             std::vector<std::vector<int>> childFaces = { get_tree_leaves(tree, tree[root].left), get_tree_leaves(tree, tree[root].right) };
             const auto childFacesOrig = childFaces; // keep a copy
-            const Tree treeOrig = tree;     
 
             // DEBUGGING
             if(CONFIG_verbose){
@@ -708,11 +715,10 @@ UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double cha
             // smoothComponentEdge(childFaces, gFaceAdj);
             smoothComponentEdge(childFaces, gFaceAdj, &tree);
             if (childFaces[0].size() == 0 || childFaces[1].size() == 0) {
-                // One of the children has no faces, so we don't smooth the edge
-                // childFaces = { get_tree_leaves(tree, tree[root].left), get_tree_leaves(tree, tree[root].right) };
+                // One of the children has no faces: undo the smoothing edits instead of
+                // restoring a whole-tree snapshot.
+                tree_undo_rollback(tree, tree_guard.undo());
                 childFaces = childFacesOrig;
-                tree.~Tree();              // destroy current state
-                new (&tree) Tree(treeOrig); // copy-construct in place (no operator=)
             }
 
             if(CONFIG_verbose){
@@ -815,7 +821,6 @@ UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double cha
         
         std::vector<std::vector<int>> childFaces = { get_tree_leaves(tree, tree[root].left), get_tree_leaves(tree, tree[root].right) };
         const auto childFacesOrig = childFaces; // keep a copy
-        const Tree treeOrig = tree;     
 
         if(CONFIG_verbose){
             std::cout << "Keep Splitting in node " << root << "  with distortion " << curr_uv_parts.distortion << std::endl;
@@ -830,11 +835,9 @@ UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double cha
         smoothComponentEdge(childFaces, gFaceAdj, &tree);
 
         if (childFaces[0].size() == 0 || childFaces[1].size() == 0) {
-            // One of the children has no faces, so we don't smooth the edge
-            // childFaces = { get_tree_leaves(tree, tree[root].left), get_tree_leaves(tree, tree[root].right) };
+            // Undo the smoothing edits; no whole-tree snapshot needed.
+            tree_undo_rollback(tree, tree_guard.undo());
             childFaces = childFacesOrig;
-            tree.~Tree();              // destroy current state
-            new (&tree) Tree(treeOrig); // copy-construct in place (no operator=)
         }
 
         if(CONFIG_verbose){
@@ -879,6 +882,7 @@ UVParts pipeline_helper(std::vector<int> leaves, Tree tree, int root, double cha
 
 
 int parse_component_from_tree(Tree &tree,int root, int max_depth,  std::vector<std::vector<int>> &all_faces, std::vector<int> &all_roots){
+    prof::Scope _pf("node.seedcut");
     // if (max_depth == 1) {
     //     all_roots.push_back(root);
     //     all_faces.push_back(get_tree_leaves(tree, root));
@@ -1021,7 +1025,8 @@ UVParts pipeline(const std::string &tree_filename, const std::string &mesh_filen
             // Access face indices for component 'c' via allParts[c]
             std::vector<int> component_faces = allFaces[c];
             int curr_root = all_roots[c];
-            UVParts curr_part = pipeline_helper(component_faces, part_field_tree, curr_root, NO_CHART_LIMIT);
+            Tree tree_local = part_field_tree;   // one copy per seed (was: per recursion node)
+            UVParts curr_part = pipeline_helper(component_faces, tree_local, curr_root, NO_CHART_LIMIT);
             all_parts[c] = curr_part;
         }
 
@@ -1032,7 +1037,8 @@ UVParts pipeline(const std::string &tree_filename, const std::string &mesh_filen
         
     }else{
         std::vector<int> leaves = get_tree_leaves(part_field_tree, root);
-        final_parts = pipeline_helper(leaves, part_field_tree, root, NO_CHART_LIMIT);
+        Tree tree_local = part_field_tree;
+        final_parts = pipeline_helper(leaves, tree_local, root, NO_CHART_LIMIT);
 
     }
     

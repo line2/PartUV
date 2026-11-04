@@ -280,6 +280,7 @@ Tree::Tree(const std::string &filename)
 }())
 {
     update_num_faces();
+    rebuild_parent_index();
 // Nothing else to do in the constructor body.
 }
 
@@ -293,6 +294,7 @@ Tree::Tree(std::vector<NodeRecord> loaded_nodes)
 }())
 {
     update_num_faces();
+    rebuild_parent_index();
 }
 
 
@@ -579,14 +581,7 @@ std::vector<int> get_tree_leaves(const Tree &tree, int node_key) {
 
 
 int find_parent_with_child(const Tree &tree, int target_child) {
-    for (const auto &pair : tree) {
-        // pair.first is the node id, pair.second is the NodeRecord
-        const NodeRecord &node = pair.second;
-        if (node.left == target_child || node.right == target_child) {
-            return pair.first;
-        }
-    }
-    return -1;
+    return tree.parent_of(target_child);   // O(1): maintained child->parent index
 }
 
 void validate_tree_leaves(Tree &tree, int num_valid_faces){
@@ -649,9 +644,11 @@ void reassign_face_in_tree(Tree &tree, int face_to_move, int target_face) {
     } else {
         gp_node.right = sibling;
     }
+    tree_undo_touch(tree, current_grandparent);
     tree.set_node(current_grandparent, gp_node);
     
     // Delete the current parent node from the tree.
+    tree_undo_touch(tree, current_parent);
     tree.delete_node(current_parent);
     
     // --- Step 2: Insert face_to_move into target_face's segment ---
@@ -679,6 +676,7 @@ void reassign_face_in_tree(Tree &tree, int face_to_move, int target_face) {
     }
     
     // Insert the new node into the tree.
+    tree_undo_touch(tree, current_parent);
     tree.set_node(current_parent, new_node);
     
     // Update the target parent's pointer so that it now points to the new node instead of target_face.
@@ -688,6 +686,7 @@ void reassign_face_in_tree(Tree &tree, int face_to_move, int target_face) {
     } else {
         target_parent_node.right = current_parent;
     }
+    tree_undo_touch(tree, target_parent);
     tree.set_node(target_parent, target_parent_node);
 }
 
