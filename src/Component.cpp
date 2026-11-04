@@ -418,6 +418,53 @@ RemoveUnreferencedVertices(Eigen::Matrix<Scalar, -1, -1> &V,
     for (int i = 0, r = 0; i < nV; ++i) if (!used(i)) removed(r++) = i;
     return removed;
 }
+// ---------------------------------------------------------------------------
+// Optional proxy dump for offline inspection (PARTUV_PROXY_DUMP=<dir>).
+// Writes the chart the proxy was built from, the proxy itself, and a small stats file.
+// ---------------------------------------------------------------------------
+namespace proxydump {
+
+inline void write_obj(const std::string &path, const Eigen::MatrixXd &V,
+                      const Eigen::MatrixXi &F) {
+    std::ofstream out(path);
+    if (!out) return;
+    out << "# verts " << V.rows() << " faces " << F.rows() << "\n";
+    out.precision(9);
+    for (int i = 0; i < V.rows(); ++i)
+        out << "v " << V(i, 0) << ' ' << V(i, 1) << ' ' << V(i, 2) << "\n";
+    for (int i = 0; i < F.rows(); ++i)
+        out << "f " << F(i, 0) + 1 << ' ' << F(i, 1) + 1 << ' ' << F(i, 2) + 1 << "\n";
+}
+
+inline void emit(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F,
+                 const Eigen::MatrixXd &Vs, const Eigen::MatrixXi &Fs,
+                 double cell, int target, double area) {
+    static const char *dir = std::getenv("PARTUV_PROXY_DUMP");
+    if (dir == nullptr || dir[0] == '\0') return;
+    static const int max_n = [] {
+        const char *m = std::getenv("PARTUV_PROXY_DUMP_MAX");
+        return m ? std::atoi(m) : 20;
+    }();
+    static std::atomic<int> counter{0};
+    static std::mutex mu;
+
+    const int id = counter.fetch_add(1);
+    if (id >= max_n) return;
+
+    std::lock_guard<std::mutex> lock(mu);
+    char base[512];
+    std::snprintf(base, sizeof(base), "%s/%04d", dir, id);
+    write_obj(std::string(base) + "_chart.obj", V, F);
+    write_obj(std::string(base) + "_proxy.obj", Vs, Fs);
+    std::ofstream meta(std::string(base) + "_meta.txt");
+    meta << "id " << id << "\n"
+         << "chart_faces " << F.rows() << "\nchart_verts " << V.rows() << "\n"
+         << "proxy_faces " << Fs.rows() << "\nproxy_verts " << Vs.rows() << "\n"
+         << "cell " << cell << "\ntarget_faces " << target << "\narea_3d " << area << "\n";
+}
+
+}  // namespace proxydump
+
 int abf_unwrap_pamo( Eigen::MatrixXd &V,
                   Eigen::MatrixXi &F,
                  Eigen::MatrixXd &UVc,
@@ -440,17 +487,21 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
                 Eigen::Vector3d c = V.row(F(f, 2)).transpose();
                 area += 0.5 * ((b - a).cross(c - a)).norm();
             }
-            // The proxy only has to be good enough for overlap/distortion screening, so
-            // coarsen hard: 5% of the chart, never more than kMaxProxyFaces.
-            const int kMaxProxyFaces = 600;
-            int target = static_cast<int>(F.rows() * 0.05);
-            target = std::max(120, std::min(target, kMaxProxyFaces));
+            // Face budget: a fraction of the chart, capped.  The cap used to be a hard 600,
+            // which made the ratio collapse for large charts (a 500k chart got 481 faces,
+            // 0.1%) and left the screening stage measuring distortion on a thumbnail.
+            int target = static_cast<int>(F.rows() * CONFIG_pamoProxyRatio);
+            target = std::max(120, std::min(target, CONFIG_pamoProxyMaxFaces));
             // grid clustering overshoots the requested count by ~1.3x on curved patches
             target = static_cast<int>(target / 1.3);
             const double cell = cheap_proxy::suggest_cell(area, std::max(60, target));
+            cheap_proxy::Options popt;
+            popt.smooth_iters = CONFIG_pamoProxySmooth;
+            popt.quadric_repr = (CONFIG_pamoProxyRepr != "centroid");
             Eigen::MatrixXd Vs; Eigen::MatrixXi Fs;
-            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, CONFIG_pamoProxySmooth);
+            const int nf = cheap_proxy::decimate(V, F, cell, Vs, Fs, popt);
             prof::add_work("proxy.faces", nf);
+            proxydump::emit(V, F, Vs, Fs, cell, target, area);
             if (nf < 8) {                  // degenerated: keep the original chart
                 return abf_unwrap(V, F, UVc, num_iter);
             }

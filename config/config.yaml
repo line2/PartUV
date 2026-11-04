@@ -20,4 +20,7 @@ unwrap:
   pamo: true
   pamo_backend: "cluster"
   pamo_proxy_smooth: 0
+  pamo_proxy_ratio: 0.05
+  pamo_proxy_max_faces: 4000
+  pamo_proxy_repr: "quadric"
   usePamoFaceThreshold: 4000   # measured: below this the PAMO proxy does not change the result

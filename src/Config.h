@@ -28,6 +28,9 @@ public:
     std::string pamoBackend;   // "cuda" | "cluster" (cheap vertex clustering)
     std::string pamoProxyMode; // "relative" (per-chart 5%) | "global" (model-wide cell)
     int pamoProxySmooth;       // Taubin passes on the clustered proxy (0 = raw grid)
+    double pamoProxyRatio;     // proxy face budget as a fraction of the chart
+    int pamoProxyMaxFaces;     // hard cap on proxy faces
+    std::string pamoProxyRepr; // "quadric" (error-minimising) | "centroid"
     int         unwrapUsePamoFaceThreshold; // use pamo if the face count is greater than this threshold (default: 1000)
 
     // Global verbose flag.
@@ -58,6 +61,9 @@ public:
           pamoBackend("cuda"),
           pamoProxyMode("relative"),
           pamoProxySmooth(0),
+          pamoProxyRatio(0.05),
+          pamoProxyMaxFaces(4000),
+          pamoProxyRepr("quadric"),
           unwrapAggParts(10),
           verbose(false),
           componentMaxDepth(10),
@@ -148,6 +154,12 @@ public:
                     pamoProxyMode = unwrapNode["pamo_proxy_mode"].as<std::string>();
                 if (unwrapNode["pamo_proxy_smooth"])
                     pamoProxySmooth = unwrapNode["pamo_proxy_smooth"].as<int>();
+                if (unwrapNode["pamo_proxy_ratio"])
+                    pamoProxyRatio = unwrapNode["pamo_proxy_ratio"].as<double>();
+                if (unwrapNode["pamo_proxy_max_faces"])
+                    pamoProxyMaxFaces = unwrapNode["pamo_proxy_max_faces"].as<int>();
+                if (unwrapNode["pamo_proxy_repr"])
+                    pamoProxyRepr = unwrapNode["pamo_proxy_repr"].as<std::string>();
                 if (unwrapNode["pamo"])
                     unwrapPamo = unwrapNode["pamo"].as<bool>();
                 if (unwrapNode["usePamoFaceThreshold"])
@@ -242,6 +254,9 @@ inline bool&        CONFIG_unwrapPamo           = ConfigManager::instance().unwr
 inline std::string& CONFIG_pamoBackend = ConfigManager::instance().pamoBackend;
 inline std::string& CONFIG_pamoProxyMode = ConfigManager::instance().pamoProxyMode;
 inline int&          CONFIG_pamoProxySmooth = ConfigManager::instance().pamoProxySmooth;
+inline double&       CONFIG_pamoProxyRatio = ConfigManager::instance().pamoProxyRatio;
+inline int&          CONFIG_pamoProxyMaxFaces = ConfigManager::instance().pamoProxyMaxFaces;
+inline std::string&  CONFIG_pamoProxyRepr = ConfigManager::instance().pamoProxyRepr;
 inline int&         CONFIG_unwrapUsePamoFaceThreshold = ConfigManager::instance().unwrapUsePamoFaceThreshold;
 // End of Selection
 

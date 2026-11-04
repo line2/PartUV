@@ -1,4 +1,6 @@
 #include "cheap_proxy.h"
+#include <Eigen/Cholesky>
+#include <Eigen/LU>
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +25,52 @@ struct CellHash {
         uint64_t uy = static_cast<uint32_t>(k.y) & 0x1FFFFF;
         uint64_t uz = static_cast<uint32_t>(k.z) & 0x1FFFFF;
         return (ux << 42) ^ (uy << 21) ^ uz;
+    }
+};
+
+/// Symmetric 4x4 plane quadric, stored as 10 coefficients (Garland & Heckbert).
+struct Quadric {
+    double a00 = 0, a01 = 0, a02 = 0, a11 = 0, a12 = 0, a22 = 0;
+    double b0 = 0, b1 = 0, b2 = 0, c = 0;
+
+    void add_plane(const Eigen::Vector3d &n, double d, double w) {
+        a00 += w * n.x() * n.x(); a01 += w * n.x() * n.y(); a02 += w * n.x() * n.z();
+        a11 += w * n.y() * n.y(); a12 += w * n.y() * n.z(); a22 += w * n.z() * n.z();
+        b0 += w * d * n.x(); b1 += w * d * n.y(); b2 += w * d * n.z();
+        c += w * d * d;
+    }
+
+    void add(const Quadric &o) {
+        a00 += o.a00; a01 += o.a01; a02 += o.a02;
+        a11 += o.a11; a12 += o.a12; a22 += o.a22;
+        b0 += o.b0; b1 += o.b1; b2 += o.b2; c += o.c;
+    }
+
+    double evaluate(const Eigen::Vector3d &p) const {
+        const double x = p.x(), y = p.y(), z = p.z();
+        return a00 * x * x + 2 * a01 * x * y + 2 * a02 * x * z +
+               a11 * y * y + 2 * a12 * y * z + a22 * z * z +
+               2 * (b0 * x + b1 * y + b2 * z) + c;
+    }
+
+    /// Minimiser of the quadric; falls back (and clamps to the cell box) when ill-conditioned.
+    Eigen::Vector3d optimal(const Eigen::Vector3d &fallback,
+                            const Eigen::Vector3d &lo, const Eigen::Vector3d &hi) const {
+        Eigen::Matrix3d A;
+        A << a00, a01, a02,
+             a01, a11, a12,
+             a02, a12, a22;
+        const double det = A.determinant();
+        const double scale = std::max({std::abs(a00), std::abs(a11), std::abs(a22), 1e-30});
+        Eigen::Vector3d p = fallback;
+        if (std::abs(det) > 1e-9 * scale * scale * scale) {
+            const Eigen::Vector3d rhs(-b0, -b1, -b2);
+            p = A.ldlt().solve(rhs);
+            if (!p.allFinite()) p = fallback;
+        }
+        // a nearly planar cell has no unique minimum along the normal -- keep it local
+        for (int i = 0; i < 3; ++i) p(i) = std::min(std::max(p(i), lo(i)), hi(i));
+        return p;
     }
 };
 
@@ -56,7 +104,6 @@ void taubin_smooth(Eigen::MatrixXd &V, const Eigen::MatrixXi &F, int iters,
     const int nv = static_cast<int>(V.rows());
     if (nv == 0 || iters <= 0) return;
 
-    // unique 1-ring adjacency
     std::vector<std::vector<int>> adj(nv);
     auto link = [&](int a, int b) {
         adj[a].push_back(b);
@@ -81,19 +128,39 @@ void taubin_smooth(Eigen::MatrixXd &V, const Eigen::MatrixXi &F, int iters,
 }
 
 int decimate(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double cell,
-             Eigen::MatrixXd &Vo, Eigen::MatrixXi &Fo, int smooth_iters) {
+             Eigen::MatrixXd &Vo, Eigen::MatrixXi &Fo, const Options &opt) {
     Vo.resize(0, 3);
     Fo.resize(0, 3);
     if (V.rows() == 0 || F.rows() == 0 || cell <= 0.0) return 0;
 
     const int nv = static_cast<int>(V.rows());
 
-    // cell index per vertex
+    // ---- per-vertex quadrics (area-weighted face planes) -----------------------------
+    std::vector<Quadric> vq;
+    if (opt.quadric_repr) {
+        vq.resize(nv);
+        for (int f = 0; f < F.rows(); ++f) {
+            const Eigen::Vector3d a = V.row(F(f, 0)).transpose();
+            const Eigen::Vector3d b = V.row(F(f, 1)).transpose();
+            const Eigen::Vector3d c = V.row(F(f, 2)).transpose();
+            const Eigen::Vector3d cr = (b - a).cross(c - a);
+            const double len = cr.norm();
+            if (len <= 1e-20) continue;
+            const Eigen::Vector3d n = cr / len;
+            const double area2 = len;                       // 2 * area
+            const double d = -n.dot(a);
+            for (int k = 0; k < 3; ++k) vq[F(f, k)].add_plane(n, d, area2);
+        }
+    }
+
+    // ---- bucket vertices into cells ---------------------------------------------------
     std::unordered_map<CellKey, int, CellHash> cell_id;
     cell_id.reserve(static_cast<size_t>(nv) * 2);
 
-    std::vector<int> vert_cell(nv, -1);   // vertex -> compacted proxy vertex
-    std::vector<Eigen::Vector3d> acc;     // centroid accumulator per proxy vertex
+    std::vector<int> vert_cell(nv, -1);
+    std::vector<Eigen::Vector3d> acc;          // centroid accumulator
+    std::vector<Quadric> cell_q;               // quadric accumulator
+    std::vector<Eigen::Vector3d> lo, hi;       // cell bounding box (clamp for the optimum)
     std::vector<int> count;
 
     for (int i = 0; i < nv; ++i) {
@@ -102,25 +169,39 @@ int decimate(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double cell,
                   static_cast<int32_t>(std::floor(V(i, 2) / cell))};
         auto it = cell_id.find(k);
         int id;
+        const Eigen::Vector3d p(V(i, 0), V(i, 1), V(i, 2));
         if (it == cell_id.end()) {
             id = static_cast<int>(acc.size());
             cell_id.emplace(k, id);
             acc.emplace_back(Eigen::Vector3d::Zero());
+            cell_q.emplace_back();
+            lo.push_back(p);
+            hi.push_back(p);
             count.push_back(0);
         } else {
             id = it->second;
+            for (int d = 0; d < 3; ++d) {
+                lo[id](d) = std::min(lo[id](d), p(d));
+                hi[id](d) = std::max(hi[id](d), p(d));
+            }
         }
         vert_cell[i] = id;
-        acc[id] += Eigen::Vector3d(V(i, 0), V(i, 1), V(i, 2));
+        acc[id] += p;
         count[id] += 1;
+        if (opt.quadric_repr) cell_q[id].add(vq[i]);
     }
 
-    // representative position = centroid of the cell
+    // ---- representative position ------------------------------------------------------
     Eigen::MatrixXd Vp(static_cast<int>(acc.size()), 3);
-    for (size_t i = 0; i < acc.size(); ++i)
-        Vp.row(static_cast<int>(i)) = (acc[i] / std::max(1, count[i])).transpose();
+    for (size_t i = 0; i < acc.size(); ++i) {
+        const Eigen::Vector3d centroid = acc[i] / std::max(1, count[i]);
+        const Eigen::Vector3d rep = opt.quadric_repr
+                                       ? cell_q[i].optimal(centroid, lo[i], hi[i])
+                                       : centroid;
+        Vp.row(static_cast<int>(i)) = rep.transpose();
+    }
 
-    // rebuild faces, dropping degenerates and duplicates
+    // ---- rebuild faces, dropping degenerates and duplicates ---------------------------
     std::vector<Eigen::Vector3i> faces;
     faces.reserve(F.rows());
     std::unordered_map<uint64_t, char> seen;
@@ -128,45 +209,39 @@ int decimate(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, double cell,
 
     for (int f = 0; f < F.rows(); ++f) {
         int a = vert_cell[F(f, 0)], b = vert_cell[F(f, 1)], c = vert_cell[F(f, 2)];
-        if (a == b || b == c || a == c) continue;             // collapsed to an edge/point
-        int lo = std::min({a, b, c}), hi = std::max({a, b, c});
-        int mid = a + b + c - lo - hi;
-        uint64_t key = (static_cast<uint64_t>(lo) << 42) ^
-                       (static_cast<uint64_t>(mid) << 21) ^ static_cast<uint64_t>(hi);
-        if (seen.emplace(key, 1).second == false) continue;   // duplicate face
+        if (a == b || b == c || a == c) continue;
+        int l = std::min({a, b, c}), h = std::max({a, b, c});
+        int m = a + b + c - l - h;
+        uint64_t key = (static_cast<uint64_t>(l) << 42) ^
+                       (static_cast<uint64_t>(m) << 21) ^ static_cast<uint64_t>(h);
+        if (seen.emplace(key, 1).second == false) continue;
         faces.emplace_back(a, b, c);
     }
-
     if (faces.empty()) return 0;
 
-    // compact vertices to those actually referenced
+    // ---- compact ----------------------------------------------------------------------
     std::vector<int> remap(static_cast<size_t>(Vp.rows()), -1);
     std::vector<int> used;
     used.reserve(Vp.rows());
     for (const auto &t : faces) {
         for (int k = 0; k < 3; ++k) {
-            int v = t[k];
-            if (remap[v] < 0) {
-                remap[v] = static_cast<int>(used.size());
-                used.push_back(v);
+            if (remap[t[k]] < 0) {
+                remap[t[k]] = static_cast<int>(used.size());
+                used.push_back(t[k]);
             }
         }
     }
 
     Vo.resize(static_cast<int>(used.size()), 3);
-    for (size_t i = 0; i < used.size(); ++i)
-        Vo.row(static_cast<int>(i)) = Vp.row(used[i]);
+    for (size_t i = 0; i < used.size(); ++i) Vo.row(static_cast<int>(i)) = Vp.row(used[i]);
 
     Fo.resize(static_cast<int>(faces.size()), 3);
     for (size_t i = 0; i < faces.size(); ++i)
         Fo.row(static_cast<int>(i)) << remap[faces[i][0]], remap[faces[i][1]], remap[faces[i][2]];
 
-    // restore triangle shape: clustering snaps to cell centroids, which crushes curved
-    // regions and leaves slivers; the screening stage measures distortion on this mesh,
-    // so those artefacts would make good charts look bad and trigger extra splits.
-    if (smooth_iters > 0) {
-        taubin_smooth(Vo, Fo, smooth_iters);
-        std::vector<Eigen::Vector3i> keep;   // drop faces that folded during smoothing
+    if (opt.smooth_iters > 0) {
+        taubin_smooth(Vo, Fo, opt.smooth_iters);
+        std::vector<Eigen::Vector3i> keep;
         keep.reserve(Fo.rows());
         for (int f = 0; f < Fo.rows(); ++f) {
             const Eigen::Vector3d a = Vo.row(Fo(f, 0)).transpose();
