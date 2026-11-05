@@ -1,5 +1,7 @@
 #include "prof.h"
 #include "CuMeshSimplifier.h"
+
+#ifdef PARTUV_HAS_CUDA
 #include "cusimp.h"
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM
 #include <cuda_runtime.h>
@@ -197,3 +199,20 @@ CuMeshSimplifier::simplify(const Eigen::MatrixXf& V_in,
     // cudaStreamDestroy(stream); // Cleanup
     return {V_out,F_out};
 }
+
+#else   // !PARTUV_HAS_CUDA ------------------------------------------------
+// CPU build: the CUDA PAMO path is not compiled in.  Component.cpp checks the
+// flag before calling this, so reaching here is a programming error.
+#include <stdexcept>
+
+namespace CuMeshSimplifier {
+std::pair<Eigen::MatrixXf, Eigen::MatrixXi>
+simplify(const Eigen::MatrixXf &, const Eigen::MatrixXi &, float, int, cudaStream_t) {
+    throw std::runtime_error(
+        "partuv was built without CUDA: unwrap.pamo_backend=\"\" is unavailable. "
+        "Use pamo_backend: \"none\" (default), \"cluster\", or rebuild with "
+        "-DPARTUV_ENABLE_CUDA=ON on a CUDA host.");
+}
+}  // namespace CuMeshSimplifier
+
+#endif  // PARTUV_HAS_CUDA

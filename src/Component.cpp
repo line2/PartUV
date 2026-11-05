@@ -5,6 +5,7 @@
 #include "igl_unwrap.h"
 #include "Component.h"
 #include <iostream>
+#include <atomic>
 #include <vector>
 #include <queue>
 #include <algorithm>
@@ -544,6 +545,7 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
             EASY_BLOCK("ABF++ PAMO");
 
             EASY_BLOCK("Simplify",profiler::colors::Grey);
+#ifdef PARTUV_HAS_CUDA
             // int cpuid = omp_get_thread_num();
             // cudaSetDevice(cpuid);
             auto [V_simp, F_simp] = CuMeshSimplifier::simplify(V.cast<float>(), F.cast<int>(), 0.0001f, 1000, stream);
@@ -567,6 +569,16 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
 
             EASY_END_BLOCK;
             return success;
+#else
+            // CPU-only build: fall back to the no-proxy path instead of failing the run.
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                std::cerr << "[partuv] built without CUDA: unwrap.pamo_backend=\"\" is "
+                             "unavailable, using pamo_backend=\"none\" instead."
+                          << std::endl;
+            }
+            return abf_unwrap(V, F, UVc, num_iter);
+#endif
             
         }
 

@@ -2,7 +2,7 @@
 #include <vector>
 #include <mutex>
 #include <condition_variable>
-#include <cuda_runtime.h>
+#include "cuda_compat.h"
 
 namespace StreamPool {
     // Initialize the stream pool with 'num_streams' streams (call this once from main)

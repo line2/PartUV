@@ -21,7 +21,7 @@
 
 #include  "Config.h"
 #include "stream_pool.h"
-#include <cuda_runtime.h>
+#include "cuda_compat.h"
 
 #define DISTORTION_THRESHOLD 0.5
 

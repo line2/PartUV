@@ -1,36 +1,68 @@
 cmake_minimum_required(VERSION 3.10)
 
 
-# set(ENV{NVCC_PREPEND_FLAGS} "--allow-unsupported-compiler")
-# # (Optional) also initialize CMake's CUDA flags with it
-# set(CMAKE_CUDA_FLAGS_INIT "--allow-unsupported-compiler")
+# ---------------------------------------------------------------------------
+# CUDA is optional.  Its only consumer is the CUDA PAMO path
+# (unwrap.pamo_backend: ""), a 300 s baseline -- the shipped default is "none"
+# and every CPU backend works without it.  Wheels are built with
+# -DPARTUV_ENABLE_CUDA=OFF so they do not link libcudart.
+# ---------------------------------------------------------------------------
+set(PARTUV_ENABLE_CUDA "AUTO" CACHE STRING "Build the CUDA PAMO path: ON | OFF | AUTO")
 set(CMAKE_CUDA_ARCHITECTURES 80 89 90)
-if(NOT DEFINED CMAKE_CUDA_COMPILER)
-  find_program(CMAKE_CUDA_COMPILER NAMES nvcc)
-  if(NOT CMAKE_CUDA_COMPILER)
-    set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.1/bin/nvcc)
-    message(WARNING "Could not find 'nvcc' in PATH. Defaulting to /usr/local/cuda-12.1/bin/nvcc.")
+
+include(CheckLanguage)
+check_language(CUDA)                      # sets CMAKE_CUDA_COMPILER if nvcc works
+
+set(_partuv_cuda OFF)
+if(PARTUV_ENABLE_CUDA STREQUAL "AUTO")
+  set(_partuv_cuda ${CMAKE_CUDA_COMPILER})
+elseif(PARTUV_ENABLE_CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    set(_partuv_cuda ON)
+  else()
+    message(WARNING "PARTUV_ENABLE_CUDA=ON but no working nvcc was found; building without CUDA")
   endif()
 endif()
+if(_partuv_cuda)
+  set(_partuv_cuda ON)
+endif()
 
-project(partuv LANGUAGES CXX CUDA)
+if(_partuv_cuda)
+  project(partuv LANGUAGES CXX CUDA)
+  add_compile_definitions(PARTUV_HAS_CUDA=1)
+  message(STATUS "partuv: CUDA ENABLED (${CMAKE_CUDA_COMPILER})")
+else()
+  project(partuv LANGUAGES CXX)
+  message(STATUS "partuv: CUDA DISABLED -- unwrap.pamo_backend=\"\" is rejected at runtime")
+endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Set up shared dependencies at the root level
 set(CMAKE_CXX_STANDARD 17)
 
 
-set(CMAKE_CUDA_STANDARD 14)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-# add_compile_definitions(CUDA_API_PER_THREAD_DEFAULT_STREAM=1)
-add_compile_definitions(CUDA_API_PER_THREAD_DEFAULT_STREAM)
+if(_partuv_cuda)
+  set(CMAKE_CUDA_STANDARD 14)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  add_compile_definitions(CUDA_API_PER_THREAD_DEFAULT_STREAM)
+endif()
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the build type")
 # set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the build type" FORCE)
 
 # message(STATUS "CMake build type: ${CMAKE_BUILD_TYPE}")
 
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math -mfpmath=sse -Ofast -fno-omit-frame-pointer -march=native")
+# -march=native bakes the build host's ISA into the binary, which segfaults on any
+# other machine -- never use it for a wheel.  PARTUV_NATIVE_ARCH=OFF (the wheel
+# default) targets the x86-64-v2 baseline instead.
+option(PARTUV_NATIVE_ARCH "Optimise for the build host CPU (-march=native)" ON)
+if(PARTUV_NATIVE_ARCH)
+  set(_partuv_arch_flag -march=native)
+else()
+  set(_partuv_arch_flag -march=x86-64-v2)
+endif()
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math -mfpmath=sse -Ofast -fno-omit-frame-pointer ${_partuv_arch_flag}")
+message(STATUS "partuv: release arch flag: ${_partuv_arch_flag}")
 # if(CMAKE_BUILD_TYPE STREQUAL "Release")
 # elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
 #     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
@@ -91,10 +123,18 @@ find_package(CGAL REQUIRED)
 
 find_package(yaml-cpp REQUIRED)
 find_package(OpenMP REQUIRED)
-find_package(TBB REQUIRED)
-find_package(CUDAToolkit REQUIRED) 
+find_package(TBB REQUIRED)   # pulled in by CGAL, see the link step
+# TBB is never referenced by our own sources, but CGAL's config adds
+# CGAL_LINKED_WITH_TBB when it finds TBB, so CGAL headers emit tbb::parallel_* calls
+# and the module needs libtbb at link time.  auditwheel vendors it into the wheel.
+if(_partuv_cuda)
+  find_package(CUDAToolkit REQUIRED)
+endif()
 
-# Find pybind11 for Python bindings
+# Find pybind11 for Python bindings.  PYBIND11_FINDPYTHON makes it use the modern
+# FindPython mode, so Python_EXECUTABLE (what scikit-build-core and every modern
+# build frontend sets) is honoured instead of the classic PYTHON_EXECUTABLE.
+set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 
 
@@ -115,9 +155,11 @@ option(USE_ALL_SRC_FILES "Use all .cpp files in src directory" ON)
 
 if(USE_ALL_SRC_FILES)
     file(GLOB SOURCES "${SRC_DIR}/*.cpp")
-    file(GLOB CUDA_SOURCES "${SRC_DIR}/*.cu")
+    if(_partuv_cuda)
+        file(GLOB CUDA_SOURCES "${SRC_DIR}/*.cu")
+        list(APPEND SOURCES ${CUDA_SOURCES})
+    endif()
     set(BINDINGS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/bindings.cpp")
-    list(APPEND SOURCES ${CUDA_SOURCES})
     list(APPEND SOURCES ${BINDINGS_SOURCES})
     message(STATUS "Using all source files in ${SRC_DIR}")
 else()
@@ -136,23 +178,18 @@ set(ENV{OMP_NUM_THREADS} "8")
 # pybind11_add_module(partuv src/bindings.cpp)
 pybind11_add_module(_core bindings.cpp ${SOURCES})
 
-# --- allow device‐side lambdas & cross‐TU __device__ calls ---
-set_target_properties(_core PROPERTIES
-  CUDA_SEPARABLE_COMPILATION ON
-)
-
-target_compile_definitions(_core PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
-
-
-
-# --- pass NVCC flags only when compiling CUDA code ---
-target_compile_options(_core PRIVATE
-  $<$<COMPILE_LANGUAGE:CUDA>:
-    --expt-extended-lambda      # enable __device__ lambdas
-    --expt-relaxed-constexpr    # (optional) allows constexpr on device
-    --default-stream=per-thread 
-  >
-)
+# --- allow device-side lambdas & cross-TU __device__ calls ---
+if(_partuv_cuda)
+  set_target_properties(_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  target_compile_definitions(_core PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
+  target_compile_options(_core PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:
+      --expt-extended-lambda
+      --expt-relaxed-constexpr
+      --default-stream=per-thread
+    >
+  )
+endif()
 # Link the Python module with the same dependencies as the main executable
 target_link_libraries(_core
     PUBLIC
@@ -163,8 +200,10 @@ target_link_libraries(_core
         OpenMP::OpenMP_CXX
         yaml-cpp
         TBB::tbb
-        CUDA::cudart
 )
+if(_partuv_cuda)
+  target_link_libraries(_core PRIVATE CUDA::cudart)
+endif()
 
 # Set include directories for the Python module
 target_include_directories(_core PRIVATE 
@@ -185,6 +224,13 @@ install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/partuv/__init__.py
   ${CMAKE_CURRENT_SOURCE_DIR}/partuv/preprocess.py
   DESTINATION partuv)
+
+# The pipeline needs a config; ship the default inside the package so a wheel is
+# usable without an external config/config.yaml.
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/config/config.yaml
+  DESTINATION partuv/data
+  RENAME default_config.yaml)
 
 install(DIRECTORY
   ${CMAKE_CURRENT_SOURCE_DIR}/preprocess_utils/

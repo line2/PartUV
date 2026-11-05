@@ -1,7 +1,7 @@
 #pragma once
 #include <Eigen/Core>
 #include <utility>      // std::pair
-#include <cuda_runtime.h>
+#include "cuda_compat.h"
 
 /// Lightweight wrapper around the CUDA PaSP simplifier in cusimp.h.
 /// All heavy work happens on the GPU; this function just prepares data,

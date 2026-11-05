@@ -1,4 +1,6 @@
 #include "stream_pool.h"
+
+#ifdef PARTUV_HAS_CUDA
 #include <thread>
 #include <atomic>
 #include <functional> // For std::hash
@@ -75,3 +77,20 @@ namespace StreamPool {
         streams_initialized = false;
     }
 }
+
+#else   // !PARTUV_HAS_CUDA ------------------------------------------------
+// No GPU: the pool is a stub, but it must hand back a *non-null* handle.
+// UnwrapPlane.cpp decides whether to take the proxy path with
+//     const bool use_pamo = (CONFIG_unwrapPamo && stream != nullptr);
+// so returning nullptr silently rewrites the charting -- measured on the welded 500k
+// model: 93 parts / 499,804 faces became 49 parts / 113,793 faces.  The CPU backends
+// never dereference the handle, so a sentinel keeps every control-flow decision intact.
+namespace StreamPool {
+    static void *const kNoCudaStream = reinterpret_cast<void *>(0x1);
+    void asyncInitializeStreams(int) {}
+    cudaStream_t getStream() { return kNoCudaStream; }
+    cudaStream_t getStream(int) { return kNoCudaStream; }
+    void destroyStreams() {}
+}  // namespace StreamPool
+
+#endif  // PARTUV_HAS_CUDA
