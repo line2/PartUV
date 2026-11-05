@@ -10,7 +10,6 @@
 #include "src/igl_unwrap.h"
 #include <igl/flipped_triangles.h>
 #include <chrono>
-#include <cstdio>
 #include "src/Distortion.h"
 #include "Config.h"
 #include "prof.h"
@@ -108,9 +107,6 @@ static py::dict bench_flatten_py(const Eigen::MatrixXd &V, const Eigen::MatrixXi
                                  const std::string &method, int iters) {
     py::dict out;
     Eigen::MatrixXd UV;
-    std::fprintf(stderr, "[bench] start %s V=%d F=%d\n", method.c_str(),
-                 (int)V.rows(), (int)F.rows());
-    std::fflush(stderr);
     const auto t0 = std::chrono::high_resolution_clock::now();
     int rc = 0;
     if (method == "abf") {
@@ -118,8 +114,6 @@ static py::dict bench_flatten_py(const Eigen::MatrixXd &V, const Eigen::MatrixXi
     } else {
         rc = igl_unwrap::flatten(V, F, UV, method, iters);
     }
-    std::fprintf(stderr, "[bench] solved rc=%d rows=%d\n", rc, (int)UV.rows());
-    std::fflush(stderr);
     const auto t1 = std::chrono::high_resolution_clock::now();
     const double secs = std::chrono::duration<double>(t1 - t0).count();
 
@@ -127,17 +121,11 @@ static py::dict bench_flatten_py(const Eigen::MatrixXd &V, const Eigen::MatrixXi
     out["seconds"] = secs;
     out["faces"] = static_cast<int>(F.rows());
     if (rc == 0 && UV.rows() == V.rows()) {
-        std::fprintf(stderr, "[bench] computing distortion\n");
-        std::fflush(stderr);
         out["distortion"] = calculate_distortion_area(V, F, UV);
-        std::fprintf(stderr, "[bench] counting flips\n");
-        std::fflush(stderr);
         Eigen::VectorXi flipped;
         igl::flipped_triangles(UV, F, flipped);
         out["flipped"] = static_cast<int>(flipped.size());
         out["uv_valid"] = true;
-        std::fprintf(stderr, "[bench] done\n");
-        std::fflush(stderr);
     } else {
         out["distortion"] = -1.0;
         out["flipped"] = -1;
