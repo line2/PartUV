@@ -480,9 +480,10 @@ int abf_unwrap_pamo( Eigen::MatrixXd &V,
     // traffic, no convergence loop.  Deliberately crude: it only has to be
     // spatially close enough for overlap / distortion screening.
     // ------------------------------------------------------------------
-    if (CONFIG_pamoBackend == "identity") {
-        // control experiment: same code path as a proxy, but the "proxy" is the chart
-        prof::Scope _pid("proxy.identity");
+    if (CONFIG_pamoBackend == "none" || CONFIG_pamoBackend == "identity") {
+        // No proxy: flatten the chart itself.  "identity" is the same thing under the
+        // name the ablation work used; "none" is the honest name for the default.
+        prof::Scope _pid("proxy.none");
         prof::add_work("proxy.faces", F.rows());
         return abf_unwrap(V, F, UVc, num_iter);
     }

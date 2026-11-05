@@ -18,9 +18,10 @@ unwrap:
   abf_iters: 5
   agg_parts: 10
   pamo: true
-  pamo_backend: "cluster"   # "cluster" (default) | "idt"* | "iso"* | "identity"* | "" (CUDA PAMO)
+  pamo_backend: "none"      # "none" (default: no proxy) | "cluster" | "idt"* | "iso"* | "" (CUDA PAMO)
                             #   * experimental; idt measured neutral, iso does not finish
                             #     on 500k-face charts. See docs/UV_QUALITY.md section 3.
+                            #   cluster is 2.7x faster but costs ~4.3 coverage points.
   pamo_proxy_smooth: 0
   pamo_proxy_ratio: 0.05
   pamo_proxy_max_faces: 4000
