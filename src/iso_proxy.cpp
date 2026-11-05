@@ -1,6 +1,7 @@
 #include "iso_proxy.h"
 #include "cheap_proxy.h"   // PRE_DECIMATE pre-pass
 
+#ifdef PARTUV_HAS_CGAL
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/remesh.h>
@@ -14,6 +15,9 @@
 namespace iso_proxy {
 namespace {
 
+#endif  // PARTUV_HAS_CGAL
+
+#ifdef PARTUV_HAS_CGAL
 using Kernel = CGAL::Simple_cartesian<double>;
 using Point = Kernel::Point_3;
 using Mesh = CGAL::Surface_mesh<Point>;
@@ -125,3 +129,14 @@ int remesh(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F, int target_faces,
 }
 
 }  // namespace iso_proxy
+
+#else   // !PARTUV_HAS_CGAL
+// The isotropic remesher needs CGAL.  Callers treat a face count below 8 as "refused
+// the chart" and fall back to vertex clustering, so returning 0 is a clean no-op.
+namespace iso_proxy {
+int remesh(const Eigen::MatrixXd &, const Eigen::MatrixXi &, int,
+           Eigen::MatrixXd &, Eigen::MatrixXi &) {
+    return 0;
+}
+}  // namespace iso_proxy
+#endif  // PARTUV_HAS_CGAL

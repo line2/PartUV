@@ -1,0 +1,93 @@
+# CPU-only manylinux image for building partuv wheels.
+#
+# manylinux_2_28 (AlmaLinux 8) ships cp39-cp313, gcc 14 and cmake 4, but has neither CGAL
+# nor a Boost new enough for it (base repos stop at 1.66; CGAL 6 wants >= 1.74).  Both are
+# installed here once so the five wheel builds reuse the same image.
+#
+#   docker build -f ci/Dockerfile.manylinux -t partuv-manylinux:2_28 ci/
+#   python -m cibuildwheel --output-dir dist .
+#
+# CGAL is used header-only (box_self_intersection_d in the triangle-overlap sweep,
+# convex_hull / PMP elsewhere), so nothing is compiled for it.  Boost is header-only too
+# but its own CMake build refuses an empty library list, so we copy the headers and write
+# the small BoostConfig.cmake that CGAL's config-mode lookup expects.
+#
+# CMAKE_POLICY_VERSION_MINIMUM=3.5: the image ships cmake 4.x, which refuses projects
+# declaring cmake_minimum_required below 3.5.
+FROM quay.io/pypa/manylinux_2_28_x86_64
+
+ARG CGAL_VERSION=6.1.1
+ARG BOOST_VERSION=1.86.0
+
+# GMP/MPFR headers keep CGALConfig's kernel checks happy.
+RUN dnf install -y gmp-devel mpfr-devel && dnf clean all
+
+# --- Boost: headers only ------------------------------------------------------------
+RUN curl -fSL --retry 5 --retry-connrefused --retry-delay 3 -o /tmp/boost.tar.gz \
+        "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_1_86_0.tar.gz" \
+ && tar -xf /tmp/boost.tar.gz -C /tmp boost_1_86_0/boost \
+ && mkdir -p /usr/local/include \
+ && cp -r /tmp/boost_1_86_0/boost /usr/local/include/ \
+ && rm -rf /tmp/boost*
+
+RUN mkdir -p /usr/local/lib64/cmake/Boost-${BOOST_VERSION} && \
+    printf '%s\n' \
+    '# Header-only Boost: CGAL needs the headers, not any compiled library.' \
+    'set(Boost_VERSION 1.86.0)' \
+    'set(Boost_VERSION_STRING "1.86.0")' \
+    'set(Boost_INCLUDE_DIRS "/usr/local/include")' \
+    'set(Boost_FOUND TRUE)' \
+    'if(NOT TARGET Boost::headers)' \
+    '  add_library(Boost::headers INTERFACE IMPORTED)' \
+    '  set_target_properties(Boost::headers PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include")' \
+    'endif()' \
+    'if(NOT TARGET Boost::boost)' \
+    '  add_library(Boost::boost INTERFACE IMPORTED)' \
+    '  set_target_properties(Boost::boost PROPERTIES INTERFACE_LINK_LIBRARIES Boost::headers)' \
+    'endif()' \
+    > /usr/local/lib64/cmake/Boost-${BOOST_VERSION}/BoostConfig.cmake && \
+    printf '%s\n' \
+    'set(PACKAGE_VERSION "1.86.0")' \
+    'if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)' \
+    '  set(PACKAGE_VERSION_COMPATIBLE FALSE)' \
+    'else()' \
+    '  set(PACKAGE_VERSION_COMPATIBLE TRUE)' \
+    '  if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)' \
+    '    set(PACKAGE_VERSION_EXACT TRUE)' \
+    '  endif()' \
+    'endif()' \
+    > /usr/local/lib64/cmake/Boost-${BOOST_VERSION}/BoostConfigVersion.cmake
+
+# --- CGAL: headers only -------------------------------------------------------------
+RUN curl -fSL --retry 5 --retry-connrefused --retry-delay 3 -o /tmp/cgal.tar.xz \
+        "https://github.com/CGAL/cgal/releases/download/v${CGAL_VERSION}/CGAL-${CGAL_VERSION}.tar.xz" \
+ && tar -xf /tmp/cgal.tar.xz -C /tmp \
+ && cmake -S "/tmp/CGAL-${CGAL_VERSION}" -B /tmp/cgal-build \
+        -DCGAL_HEADER_ONLY=ON \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+ && cmake --install /tmp/cgal-build --prefix /usr/local \
+ && rm -rf /tmp/cgal*
+
+# --- yaml-cpp ----------------------------------------------------------------------
+RUN curl -fSL --retry 5 --retry-connrefused --retry-delay 3 -o /tmp/yaml.tar.gz \
+        "https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.tar.gz" \
+ && tar -xf /tmp/yaml.tar.gz -C /tmp \
+ && cmake -S /tmp/yaml-cpp-0.8.0 -B /tmp/yaml-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DYAML_CPP_BUILD_TESTS=OFF \
+        -DYAML_CPP_BUILD_TOOLS=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+ && cmake --build /tmp/yaml-build -j"$(nproc)" \
+ && cmake --install /tmp/yaml-build \
+ && rm -rf /tmp/yaml*
+
+ENV CMAKE_PREFIX_PATH=/usr/local
+
+# x86_64 AlmaLinux installs into lib64, not lib.
+RUN ls /usr/local/include/boost/version.hpp \
+ && ls /usr/local/lib64/cmake/Boost-1.86.0/BoostConfig.cmake \
+ && ls /usr/local/lib64/cmake/CGAL/CGALConfig.cmake \
+ && ls /usr/local/lib64/cmake/yaml-cpp/yaml-cpp-config.cmake \
+ && echo "image ready"

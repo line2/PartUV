@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "partuv"
-version = "0.1.2.2"
+version = "0.2.0"
 description = "UV unwrapping pipeline with pybind11 bindings and preprocessing utilities"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,11 +13,23 @@ dependencies = [
   "numpy",
   "trimesh==4.9.0",
   "scipy",
-  "opencv-python",
-  "libigl",
+  "pyyaml",
 ]
 
-
+# The PartField preprocessing stage is the only thing that needs torch + a GPU.
+# `pip install partuv` alone gives the CPU unwrapping pipeline, which is what the
+# trimesh API uses when you already have a tree.
+[project.optional-dependencies]
+preprocess = [
+  "torch",
+  "lightning==2.2",
+  "h5py",
+  "yacs",
+  "loguru",
+  "einops",
+  "plyfile",
+  "scikit-image",
+]
 
 [tool.scikit-build]
 sdist.include = [
@@ -26,5 +38,28 @@ sdist.include = [
 ]
 build.verbose = true
 ninja.make-fallback = true
+# Wheels are CPU-only: the CUDA PAMO path (unwrap.pamo_backend: "") is a slow baseline
+# and would drag libcudart into every install.
+cmake.define.PARTUV_ENABLE_CUDA = "OFF"
+cmake.define.PARTUV_NATIVE_ARCH = "OFF"
+cmake.define.CMAKE_BUILD_TYPE = "Release"
 
 wheel.packages = ["partuv", "preprocess_utils"]
+
+# ---------------------------------------------------------------------------
+# Local wheel builds (no CI):  python -m cibuildwheel --output-dir dist .
+# The image is built from ci/Dockerfile.manylinux because CGAL is not in manylinux.
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux* *-win* *-macosx* *-pp*"
+manylinux-x86_64-image = "partuv-manylinux:2_28"
+test-command = "python -c \"import sys, partuv; assert 'torch' not in sys.modules; print(partuv.__version__)\""
+test-requires = ["numpy", "trimesh==4.9.0", "scipy", "pyyaml"]
+
+[tool.cibuildwheel.linux]
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+before-build = "pip install -U 'cmake>=3.20'"
+
+[tool.cibuildwheel.linux.environment]
+PARTUV_ENABLE_CUDA = "OFF"

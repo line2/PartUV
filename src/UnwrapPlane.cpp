@@ -44,9 +44,8 @@
 
 
 
-// ---------------- CGAL headers ----------------
-#include <CGAL/Simple_cartesian.h>
-#include <CGAL/convex_hull_2.h>
+// ---------------- convex hull (was CGAL) ----------------
+#include "hull2d.h"
 
 using namespace MeshLib;
 
@@ -237,23 +236,15 @@ CutPlaneResult find_max_cut_plane_box_multiplane(const Eigen::MatrixXd &V_rotate
                 }
             }
 
-            // 7) Use CGAL to compute the 2D convex hull
-            std::vector<Point_2> cgal_points;
-            cgal_points.reserve(pts2D.rows());
-
+            // 7)+8) Area of the 2D convex hull of the slab's vertices
+            std::vector<std::pair<double, double>> hull_pts;
+            hull_pts.reserve(pts2D.rows());
             for(int i = 0; i < pts2D.rows(); ++i)
-                cgal_points.emplace_back(pts2D(i,0), pts2D(i,1));
+                hull_pts.emplace_back(pts2D(i,0), pts2D(i,1));
 
-            std::vector<Point_2> hull;
-            hull.reserve(cgal_points.size());
-            CGAL::convex_hull_2(cgal_points.begin(), cgal_points.end(),
-                                std::back_inserter(hull));
-
-            if(hull.size() < 3)
+            const double area = hull2d::area(hull_pts);
+            if(area <= 0.0)
                 continue;
-
-            // 8) Compute area of that hull
-            double area = polygonArea2D(hull);
 
             // 9) Track maximum cross-sectional area
             if(area > max_area)

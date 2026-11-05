@@ -40,10 +40,12 @@
 
 #include <easy/profiler.h>
 
+#ifdef PARTUV_HAS_CGAL
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
+#endif
 #include <omp.h>
 #include <cmath>
 
@@ -51,11 +53,13 @@
 #include <fstream>
 #include "prof.h"
 
+#ifdef PARTUV_HAS_CGAL
 namespace PMP = CGAL::Polygon_mesh_processing;
 
 typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
 typedef CGAL::Surface_mesh<K::Point_3>                      Mesh;
 typedef boost::graph_traits<Mesh>::face_descriptor          face_descriptor;
+#endif  // PARTUV_HAS_CGAL
 
 #define ENABLE_PROFILING
 
@@ -189,6 +193,7 @@ void log_traverse_csv(const NodeRecord *node, const UVParts *uv_parts, int paren
 }
 
 
+#ifdef PARTUV_HAS_CGAL
 bool check_self_intersection(std::string mesh_filename){
     Mesh mesh;
     if(!PMP::IO::read_polygon_mesh(mesh_filename, mesh) || !CGAL::is_triangle_mesh(mesh))
@@ -208,6 +213,14 @@ bool check_self_intersection(std::string mesh_filename){
 
     return intersected_tris.size() > 0;
 }
+
+#else   // !PARTUV_HAS_CGAL
+bool check_self_intersection(std::string) {
+    std::cerr << "[partuv] built without CGAL: self-intersection checking is disabled"
+              << std::endl;
+    return false;
+}
+#endif  // PARTUV_HAS_CGAL
 
 // make sure V and F is within bounds
 bool check_mesh(const Eigen::MatrixXd &V, const Eigen::MatrixXi &F){

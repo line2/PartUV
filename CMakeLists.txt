@@ -118,12 +118,35 @@ include_directories(
 # include_directories("/usr/include/suitesparse")
 # Find common dependencies
 
-find_package(CGAL REQUIRED)
+# CGAL is optional.  Its only unconditional user was CGAL::convex_hull_2 in the
+# cutting-plane search, now replaced by src/hull2d.h; what remains is the optional
+# self-intersection check and the experimental isotropic remesher.  manylinux cannot
+# provide CGAL 6 (its config wants Boost >= 1.74), so the wheel is built without it.
+set(PARTUV_ENABLE_CGAL "AUTO" CACHE STRING "Use CGAL when available: ON | OFF | AUTO")
+find_package(CGAL QUIET)
+set(_partuv_cgal OFF)
+if(PARTUV_ENABLE_CGAL STREQUAL "OFF")
+  set(_partuv_cgal OFF)
+elseif(CGAL_FOUND)
+  set(_partuv_cgal ON)          # ON or AUTO with CGAL present
+elseif(PARTUV_ENABLE_CGAL STREQUAL "ON")
+  message(WARNING "PARTUV_ENABLE_CGAL=ON but CGAL was not found; building without it")
+endif()
+if(_partuv_cgal)
+  add_compile_definitions(PARTUV_HAS_CGAL=1)
+  message(STATUS "partuv: CGAL ENABLED")
+else()
+  message(STATUS "partuv: CGAL DISABLED -- self-intersection check and iso proxy are stubs")
+endif()
 # easy_profiler stubbed out (no-op macros) 
 
 find_package(yaml-cpp REQUIRED)
 find_package(OpenMP REQUIRED)
-find_package(TBB REQUIRED)   # pulled in by CGAL, see the link step
+
+# TBB is optional: CGAL links it into its parallel paths when present.  When absent
+# CGAL leaves CGAL_LINKED_WITH_TBB undefined and nothing references libtbb, which is
+# what happens in the manylinux image.
+find_package(TBB QUIET)
 # TBB is never referenced by our own sources, but CGAL's config adds
 # CGAL_LINKED_WITH_TBB when it finds TBB, so CGAL headers emit tbb::parallel_* calls
 # and the module needs libtbb at link time.  auditwheel vendors it into the wheel.
@@ -199,8 +222,13 @@ target_link_libraries(_core
         triangle_intersection
         OpenMP::OpenMP_CXX
         yaml-cpp
-        TBB::tbb
 )
+if(TBB_FOUND)
+  target_link_libraries(_core PRIVATE TBB::tbb)
+endif()
+if(_partuv_cgal)
+  target_link_libraries(_core PRIVATE CGAL::CGAL)
+endif()
 if(_partuv_cuda)
   target_link_libraries(_core PRIVATE CUDA::cudart)
 endif()
